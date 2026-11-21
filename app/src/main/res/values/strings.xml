@@ -34,6 +34,6 @@
 
     <string name="about_title">About</string>
     <string name="about_card_header">About App</string>
-    <string name="about_app_desc">Ultra-Light Floating Clock: Milliseconds, Instant Precision, Live Network Stats, Tiny Footprint and Battery-Friendly</string>
+    <string name="about_app_desc">Ultra-Light Floating Clock: Milliseconds, Instant Precision, Live Network Stats, Compass, Tiny Footprint and Battery-Friendly</string>
     <string name="about_dev_label">Developer</string>
 </resources>
