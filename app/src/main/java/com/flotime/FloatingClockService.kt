@@ -13,6 +13,7 @@ import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
+import android.graphics.CornerPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -99,7 +100,6 @@ internal class DynamicRefreshRateMonitor(
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
 
-        // Drop oldest sample if buffer is full
         if (count == ringSize) {
             head = (head + 1) % ringSize
             count--
@@ -108,7 +108,6 @@ internal class DynamicRefreshRateMonitor(
         tail = (tail + 1) % ringSize
         count++
 
-        // Maintain a 1-second sliding window of delivered VSync frames
         val windowStart = frameTimeNanos - 1_000_000_000L
         while (count > 1 && frameTimes[head] < windowStart) {
             head = (head + 1) % ringSize
@@ -150,6 +149,9 @@ internal class GShockClockRenderer(private val density: Float) {
     private val dialBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val innerRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
 
+    private val subDialRecessPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val subDialRingFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+
     private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -157,8 +159,11 @@ internal class GShockClockRenderer(private val density: Float) {
     private val markerFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val markerInnerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
+    private val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val cardBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val lcdBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val lcdBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private var lastLcdCornerPx = -1f
 
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         isSubpixelText = true
@@ -180,6 +185,7 @@ internal class GShockClockRenderer(private val density: Float) {
     private val rectTmp = RectF()
     private val pathTmp = Path()
     private val pathLume = Path()
+    private val lcdPath = Path()
 
     fun draw(
         canvas: Canvas,
@@ -208,16 +214,15 @@ internal class GShockClockRenderer(private val density: Float) {
         val dialFaceColor = if (dark) Color.parseColor("#10141B") else Color.parseColor("#F8FAFD")
         val chapterStrokeColor = if (dark) Color.parseColor("#263042") else Color.parseColor("#CBD5E1")
 
-        // Uniform small & slim text color (matches floating digital card subtext)
-        val uniformStatColor = if (dark) Color.parseColor("#D9E2EC") else Color.parseColor("#475569")
         val subtleTickText = if (dark) Color.parseColor("#7D8A9E") else Color.parseColor("#94A3B8")
+        val compassTextColor = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#475569")
         val accentRed = Color.parseColor("#FF3B1D")
 
-        // Matches the Digital button colors in MainActivity
+        // Unified Digital button palette for Network Stats, Hz, and LCD columns
         val digitalBtnBg = if (dark) Color.parseColor("#1E2430") else Color.parseColor("#FFFFFF")
         val digitalBtnStroke = if (dark) Color.parseColor("#2D3548") else Color.parseColor("#D8E2EE")
         val digitalBtnBlue = if (dark) Color.parseColor("#58A6FF") else Color.parseColor("#1690F3")
-        val digitalBtnBlueSoft = if (dark) Color.argb(190, 88, 166, 255) else Color.argb(190, 22, 144, 243)
+        val digitalBtnBlueSoft = if (dark) Color.argb(195, 88, 166, 255) else Color.argb(195, 22, 144, 243)
 
         // 1. Classic G-Shock layered bezel with 4 subtle bumper lugs
         bezelLugPaint.color = bezelLugColor
@@ -336,44 +341,102 @@ internal class GShockClockRenderer(private val density: Float) {
             canvas.restore()
         }
 
-        // 5. Borderless Flowing Stats (Uniform small, slim font & color — no grey boxes)
+        cardBgPaint.color = digitalBtnBg
+        cardBorderPaint.color = digitalBtnStroke
+        cardBorderPaint.strokeWidth = max(1.0f * density, dialR * 0.010f)
+
+        // 5. Stats: G-Shock Compass Subdial (upper-right, no degrees) + Left-Aligned Network Stats (top) & Hz (bottom)
         if (showStats) {
-            val uniformStatSize = dialR * 0.064f
-            textPaint.typeface = sansSlim
-            textPaint.textSize = uniformStatSize
-            textPaint.color = uniformStatColor
+            val boxCorner = dialR * 0.048f
+            val leftEdge = cx - dialR * 0.585f
+            val textPadX = dialR * 0.042f
+            val statTextSize = dialR * 0.060f
+
+            // --- Network Stats Column (TOP, left-aligned) ---
+            rectTmp.set(
+                leftEdge,
+                cy - dialR * 0.345f,
+                cx - dialR * 0.095f,
+                cy - dialR * 0.095f
+            )
+            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBgPaint)
+            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBorderPaint)
+
+            textPaint.textAlign = Paint.Align.LEFT
+            textPaint.typeface = serifAcademic
+            textPaint.textSize = statTextSize
+            textPaint.color = digitalBtnBlue
             val statFm = textPaint.fontMetrics
             val statYOff = -(statFm.ascent + statFm.descent) / 2f
 
-            // Dynamic Refresh Rate (VHz / angkaHz) — upper-left, flowing directly on dial
-            val leftColX = cx - dialR * 0.355f
-            textPaint.textAlign = Paint.Align.CENTER
-            canvas.drawText("${hzValue}Hz", leftColX, cy - dialR * 0.205f + statYOff, textPaint)
+            canvas.drawText("↑ $upText", rectTmp.left + textPadX, rectTmp.top + rectTmp.height() * 0.32f + statYOff, textPaint)
+            canvas.drawText("↓ $downText", rectTmp.left + textPadX, rectTmp.top + rectTmp.height() * 0.70f + statYOff, textPaint)
 
-            // Network Upload / Download speeds — mid-left, flowing directly on dial
-            canvas.drawText("↑ $upText", leftColX, cy + dialR * 0.015f + statYOff, textPaint)
-            canvas.drawText("↓ $downText", leftColX, cy + dialR * 0.115f + statYOff, textPaint)
+            // --- Dynamic Refresh Rate Column (BELOW Network Stats, left-aligned) ---
+            rectTmp.set(
+                leftEdge,
+                cy - dialR * 0.040f,
+                cx - dialR * 0.255f,
+                cy + dialR * 0.130f
+            )
+            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBgPaint)
+            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBorderPaint)
 
-            // Compact Classic Compass Subdial (no grey fill, flows with dial)
-            val subCx = cx + dialR * 0.375f
-            val subCy = cy - dialR * 0.205f
-            val subR = dialR * 0.205f
+            textPaint.textAlign = Paint.Align.LEFT
+            textPaint.typeface = serifAcademicBold
+            textPaint.textSize = dialR * 0.068f
+            textPaint.color = digitalBtnBlue
+            val hzFm = textPaint.fontMetrics
+            val hzY = rectTmp.centerY() - (hzFm.ascent + hzFm.descent) / 2f
+            canvas.drawText("${hzValue}Hz", rectTmp.left + textPadX, hzY, textPaint)
 
-            innerRingPaint.color = chapterStrokeColor
-            innerRingPaint.strokeWidth = max(0.9f * density, subR * 0.055f)
+            // --- Classic G-Shock Layered Compass Subdial (upper-right, matching reference size & shape, no degree text) ---
+            val subCx = cx + dialR * 0.295f
+            val subCy = cy - dialR * 0.270f
+            val subR = dialR * 0.280f
+
+            // Outer recessed well
+            subDialRecessPaint.color = if (dark) Color.parseColor("#171C25") else Color.parseColor("#E6EDF6")
+            canvas.drawCircle(subCx, subCy, subR, subDialRecessPaint)
+
+            innerRingPaint.color = if (dark) Color.parseColor("#3B475C") else Color.parseColor("#B5C4D8")
+            innerRingPaint.strokeWidth = max(1.1f * density, subR * 0.045f)
             canvas.drawCircle(subCx, subCy, subR, innerRingPaint)
 
-            innerRingPaint.color = if (dark) Color.argb(95, 148, 163, 184) else Color.argb(95, 100, 116, 139)
-            innerRingPaint.strokeWidth = max(0.75f * density, subR * 0.045f)
-            canvas.drawCircle(subCx, subCy, subR * 0.62f, innerRingPaint)
+            // Raised metallic-style inner ring (signature G-Shock subdial ring)
+            subDialRingFillPaint.color = if (dark) Color.parseColor("#242C3A") else Color.parseColor("#D4DFEE")
+            canvas.drawCircle(subCx, subCy, subR * 0.68f, subDialRingFillPaint)
 
-            for (t in 0 until 16) {
-                val a = Math.toRadians((t * 22.5))
-                val isMajor = t % 4 == 0
-                val r1 = subR * (if (isMajor) 0.72f else 0.82f)
+            // Inner dark core
+            subDialRecessPaint.color = dialFaceColor
+            canvas.drawCircle(subCx, subCy, subR * 0.48f, subDialRecessPaint)
+
+            innerRingPaint.color = if (dark) Color.parseColor("#526078") else Color.parseColor("#94A3B8")
+            innerRingPaint.strokeWidth = max(0.85f * density, subR * 0.032f)
+            canvas.drawCircle(subCx, subCy, subR * 0.68f, innerRingPaint)
+            canvas.drawCircle(subCx, subCy, subR * 0.48f, innerRingPaint)
+
+            // 24 crisp perimeter ticks on the subdial track
+            for (t in 0 until 24) {
+                val a = Math.toRadians((t * 15).toDouble())
+                val isCardinal = t % 6 == 0
+                val isSub = t % 3 == 0
+                val r1 = subR * when {
+                    isCardinal -> 0.72f
+                    isSub -> 0.78f
+                    else -> 0.84f
+                }
                 val r2 = subR * 0.94f
-                tickPaint.color = if (t == 0) accentRed else subtleTickText
-                tickPaint.strokeWidth = if (isMajor) max(1.0f * density, subR * 0.05f) else max(0.65f * density, subR * 0.03f)
+                tickPaint.color = when {
+                    t == 0 -> accentRed
+                    isCardinal -> compassTextColor
+                    else -> subtleTickText
+                }
+                tickPaint.strokeWidth = when {
+                    isCardinal -> max(1.2f * density, subR * 0.048f)
+                    isSub -> max(0.9f * density, subR * 0.032f)
+                    else -> max(0.65f * density, subR * 0.022f)
+                }
                 canvas.drawLine(
                     subCx + (r1 * sin(a)).toFloat(),
                     subCy - (r1 * cos(a)).toFloat(),
@@ -383,131 +446,161 @@ internal class GShockClockRenderer(private val density: Float) {
                 )
             }
 
-            val cardR = subR * 0.44f
+            // Cardinal letters N / E / S / W on the stepped track
+            val cardR = subR * 0.58f
             textPaint.textAlign = Paint.Align.CENTER
-            textPaint.typeface = sansSlim
-            textPaint.textSize = subR * 0.26f
+            textPaint.typeface = sansMedium
+            textPaint.textSize = subR * 0.21f
             val cFm = textPaint.fontMetrics
             val cYOff = -(cFm.ascent + cFm.descent) / 2f
 
             textPaint.color = accentRed
             canvas.drawText("N", subCx, subCy - cardR + cYOff, textPaint)
-            textPaint.color = uniformStatColor
+            textPaint.color = compassTextColor
             canvas.drawText("E", subCx + cardR, subCy + cYOff, textPaint)
             canvas.drawText("S", subCx, subCy + cardR + cYOff, textPaint)
             canvas.drawText("W", subCx - cardR, subCy + cYOff, textPaint)
 
+            // Double-ended compass needle
             canvas.save()
             canvas.rotate(azimuthDeg, subCx, subCy)
 
             pathTmp.reset()
-            pathTmp.moveTo(subCx, subCy - subR * 0.76f)
-            pathTmp.lineTo(subCx - subR * 0.10f, subCy)
-            pathTmp.lineTo(subCx + subR * 0.10f, subCy)
+            pathTmp.moveTo(subCx, subCy - subR * 0.74f)
+            pathTmp.lineTo(subCx - subR * 0.095f, subCy)
+            pathTmp.lineTo(subCx + subR * 0.095f, subCy)
             pathTmp.close()
             capPaint.color = accentRed
             canvas.drawPath(pathTmp, capPaint)
 
             pathTmp.reset()
-            pathTmp.moveTo(subCx, subCy + subR * 0.50f)
-            pathTmp.lineTo(subCx - subR * 0.085f, subCy)
-            pathTmp.lineTo(subCx + subR * 0.085f, subCy)
+            pathTmp.moveTo(subCx, subCy + subR * 0.46f)
+            pathTmp.lineTo(subCx - subR * 0.08f, subCy)
+            pathTmp.lineTo(subCx + subR * 0.08f, subCy)
             pathTmp.close()
             capPaint.color = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#475569")
             canvas.drawPath(pathTmp, capPaint)
 
-            capPaint.color = uniformStatColor
-            canvas.drawCircle(subCx, subCy, subR * 0.09f, capPaint)
+            capPaint.color = if (dark) Color.parseColor("#F8FAFC") else Color.parseColor("#1E293B")
+            canvas.drawCircle(subCx, subCy, subR * 0.085f, capPaint)
             canvas.restore()
-
-            // Compass degree readout — borderless, exact same small slim font & color
-            textPaint.textAlign = Paint.Align.CENTER
-            textPaint.typeface = sansSlim
-            textPaint.textSize = uniformStatSize
-            textPaint.color = uniformStatColor
-            canvas.drawText("$cardinalStr ${azimuthDeg.roundToInt()}°", subCx, cy + dialR * 0.115f + statYOff, textPaint)
         }
 
-        // 6. Parallel Bottom Columns: [ Flotime ] + [ Digital Clock & right-aligned Sat 21 ]
-        // Styled identically to the Digital button (bg, border, blue academic serif text)
-        val colTop = cy + dialR * 0.255f
-        val colBottom = cy + dialR * 0.515f
-        val colCorner = dialR * 0.055f
+        // 6. Center-Down G-Shock Beveled Digital LCD Column
+        // Format:
+        //   24H 23.49 20
+        //   flotime | Sat 21
+        val lcdTop = cy + dialR * 0.205f
+        val lcdMidY = cy + dialR * 0.415f
+        val lcdBottom = cy + dialR * 0.575f
+        val lcdHalfWTop = dialR * 0.490f
+        val lcdHalfWBot = dialR * 0.355f
+
+        lcdPath.reset()
+        lcdPath.moveTo(cx - lcdHalfWTop, lcdTop)
+        lcdPath.lineTo(cx + lcdHalfWTop, lcdTop)
+        lcdPath.lineTo(cx + lcdHalfWTop, lcdMidY)
+        lcdPath.lineTo(cx + lcdHalfWBot, lcdBottom)
+        lcdPath.lineTo(cx - lcdHalfWBot, lcdBottom)
+        lcdPath.lineTo(cx - lcdHalfWTop, lcdMidY)
+        lcdPath.close()
+
+        val cornerPx = dialR * 0.036f
+        if (abs(cornerPx - lastLcdCornerPx) > 0.5f) {
+            lastLcdCornerPx = cornerPx
+            val effect = CornerPathEffect(cornerPx)
+            lcdBgPaint.pathEffect = effect
+            lcdBorderPaint.pathEffect = effect
+        }
 
         lcdBgPaint.color = digitalBtnBg
         lcdBorderPaint.color = digitalBtnStroke
-        lcdBorderPaint.strokeWidth = max(1.0f * density, dialR * 0.010f)
+        lcdBorderPaint.strokeWidth = max(1.05f * density, dialR * 0.011f)
+        canvas.drawPath(lcdPath, lcdBgPaint)
+        canvas.drawPath(lcdPath, lcdBorderPaint)
 
-        // --- Left Parallel Column: "Flotime" ---
-        rectTmp.set(
-            cx - dialR * 0.485f,
-            colTop,
-            cx - dialR * 0.135f,
-            colBottom
-        )
-        canvas.drawRoundRect(rectTmp, colCorner, colCorner, lcdBgPaint)
-        canvas.drawRoundRect(rectTmp, colCorner, colCorner, lcdBorderPaint)
-
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.typeface = serifAcademicBold
-        textPaint.color = digitalBtnBlue
-        textPaint.textSize = dialR * 0.072f
-        val brandFm = textPaint.fontMetrics
-        val brandY = rectTmp.centerY() - (brandFm.ascent + brandFm.descent) / 2f
-        canvas.drawText("Flotime", rectTmp.centerX(), brandY, textPaint)
-
-        // --- Right Parallel Column: Digital Clock + Right-Aligned "Sat 21" ---
-        rectTmp.set(
-            cx - dialR * 0.105f,
-            colTop,
-            cx + dialR * 0.485f,
-            colBottom
-        )
-        canvas.drawRoundRect(rectTmp, colCorner, colCorner, lcdBgPaint)
-        canvas.drawRoundRect(rectTmp, colCorner, colCorner, lcdBorderPaint)
-
-        val lcdMidY = rectTmp.top + rectTmp.height() * 0.55f
+        // Subtle horizontal divider inside LCD
         innerRingPaint.color = digitalBtnStroke
         innerRingPaint.strokeWidth = max(0.7f * density, dialR * 0.006f)
         canvas.drawLine(
-            rectTmp.left + dialR * 0.04f,
+            cx - dialR * 0.42f,
             lcdMidY,
-            rectTmp.right - dialR * 0.04f,
+            cx + dialR * 0.42f,
             lcdMidY,
             innerRingPaint
         )
 
-        val rightPadX = rectTmp.right - dialR * 0.042f
+        // Row 1: "24H 23.49 20" (centered horizontally; 24H uppercase slim, academic serif blue)
+        val badgeText = "24H"
+        val badgeSize = dialR * 0.068f
+        val hmSize = dialR * 0.118f
+        val secSize = dialR * 0.082f
+        val gapAfterBadge = dialR * 0.036f
+        val gapBeforeSec = dialR * 0.024f
 
-        // Micro "24H" indicator on top-left
-        textPaint.textAlign = Paint.Align.LEFT
-        textPaint.typeface = serifAcademic
-        textPaint.color = digitalBtnBlueSoft
-        textPaint.textSize = dialR * 0.038f
-        canvas.drawText("24H", rectTmp.left + dialR * 0.04f, rectTmp.top + rectTmp.height() * 0.34f, textPaint)
-
-        // Digital Time (HH:mm + ss) in academic serif blue, aligned neatly to right edge
-        val timeBaseY = rectTmp.top + rectTmp.height() * 0.45f
-        textPaint.textAlign = Paint.Align.RIGHT
-        textPaint.typeface = serifAcademic
-        textPaint.color = digitalBtnBlueSoft
-        textPaint.textSize = dialR * 0.068f
-        val secW = textPaint.measureText(lcdSecStr)
-        canvas.drawText(lcdSecStr, rightPadX, timeBaseY, textPaint)
+        textPaint.typeface = sansSlim
+        textPaint.textSize = badgeSize
+        val badgeW = textPaint.measureText(badgeText)
 
         textPaint.typeface = serifAcademicBold
-        textPaint.color = digitalBtnBlue
-        textPaint.textSize = dialR * 0.098f
-        canvas.drawText(lcdHmStr, rightPadX - secW - dialR * 0.014f, timeBaseY, textPaint)
+        textPaint.textSize = hmSize
+        val hmW = textPaint.measureText(lcdHmStr)
+        val hmFm = textPaint.fontMetrics
 
-        // Bottom Date: "Sat 21" right-aligned in academic serif blue
-        textPaint.textAlign = Paint.Align.RIGHT
         textPaint.typeface = serifAcademic
+        textPaint.textSize = secSize
+        val secW = textPaint.measureText(lcdSecStr)
+
+        val row1TotalW = badgeW + gapAfterBadge + hmW + gapBeforeSec + secW
+        var cursorX = cx - (row1TotalW / 2f)
+        val row1BaseY = (lcdTop + lcdMidY) / 2f - (hmFm.ascent + hmFm.descent) / 2f
+
+        textPaint.textAlign = Paint.Align.LEFT
+
+        textPaint.typeface = sansSlim
+        textPaint.textSize = badgeSize
+        textPaint.color = digitalBtnBlueSoft
+        canvas.drawText(badgeText, cursorX, row1BaseY, textPaint)
+        cursorX += badgeW + gapAfterBadge
+
+        textPaint.typeface = serifAcademicBold
+        textPaint.textSize = hmSize
         textPaint.color = digitalBtnBlue
-        textPaint.textSize = dialR * 0.072f
-        val dFm = textPaint.fontMetrics
-        val dateCenterY = (lcdMidY + rectTmp.bottom) / 2f - (dFm.ascent + dFm.descent) / 2f
-        canvas.drawText(dayDateStr, rightPadX, dateCenterY, textPaint)
+        canvas.drawText(lcdHmStr, cursorX, row1BaseY, textPaint)
+        cursorX += hmW + gapBeforeSec
+
+        textPaint.typeface = serifAcademic
+        textPaint.textSize = secSize
+        textPaint.color = digitalBtnBlueSoft
+        canvas.drawText(lcdSecStr, cursorX, row1BaseY, textPaint)
+
+        // Row 2: "flotime | Sat 21" (centered in lower beveled half, academic serif blue)
+        val row2Brand = "flotime"
+        val row2Sep = " | "
+        val row2Size = dialR * 0.070f
+
+        textPaint.typeface = serifAcademic
+        textPaint.textSize = row2Size
+        val bW = textPaint.measureText(row2Brand)
+        val sepW = textPaint.measureText(row2Sep)
+        val dateW = textPaint.measureText(dayDateStr)
+        val row2TotalW = bW + sepW + dateW
+
+        val row2Fm = textPaint.fontMetrics
+        val row2BaseY = (lcdMidY + lcdBottom) / 2f - (row2Fm.ascent + row2Fm.descent) / 2f
+        var r2X = cx - (row2TotalW / 2f)
+
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.color = digitalBtnBlue
+        canvas.drawText(row2Brand, r2X, row2BaseY, textPaint)
+        r2X += bW
+
+        textPaint.color = digitalBtnBlueSoft
+        canvas.drawText(row2Sep, r2X, row2BaseY, textPaint)
+        r2X += sepW
+
+        textPaint.color = digitalBtnBlue
+        canvas.drawText(dayDateStr, r2X, row2BaseY, textPaint)
 
         // 7. Classic Sculpted G-Shock Analog Hands (Discrete Quartz Ticking)
         cal.timeInMillis = nowMillis
@@ -1018,7 +1111,7 @@ class FloatingClockService : Service() {
     private var hoveredAction = HOVER_NONE
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss.", Locale.US)
-    private val lcdHmFormat = SimpleDateFormat("HH:mm", Locale.US)
+    private val lcdHmFormat = SimpleDateFormat("HH.mm", Locale.US)
     private val lcdSecFormat = SimpleDateFormat("ss", Locale.US)
     private val floatingDateFormat = SimpleDateFormat("EEE, MMM d", Locale.ENGLISH)
     private val gshockLcdDayDateFormat = SimpleDateFormat("EEE d", Locale.ENGLISH)
@@ -2012,7 +2105,7 @@ class FloatingClockService : Service() {
 
         private var nowMillis = System.currentTimeMillis()
         private var lastRenderedSec = -1L
-        private var lcdHmStr = "00:00"
+        private var lcdHmStr = "00.00"
         private var lcdSecStr = "00"
         private var dayDateStr = "Sat 21"
         private var hzValue = 60
