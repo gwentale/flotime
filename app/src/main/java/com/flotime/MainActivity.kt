@@ -136,9 +136,9 @@ class MainActivity : Activity() {
     private var hidePopupRunnable: Runnable? = null
 
     private val timeFormat24 = SimpleDateFormat("HH:mm:ss.", Locale.US)
-    private val timeFormat12 = SimpleDateFormat("hh:mm:ss.", Locale.US)
+    private val timeFormat12 = SimpleDateFormat("KK:mm:ss.", Locale.US)
     private val lcdHmFormat24 = SimpleDateFormat("HH.mm", Locale.US)
-    private val lcdHmFormat12 = SimpleDateFormat("hh.mm", Locale.US)
+    private val lcdHmFormat12 = SimpleDateFormat("KK.mm", Locale.US)
     private val lcdSecFormat = SimpleDateFormat("ss", Locale.US)
     private val amPmFormat = SimpleDateFormat("a", Locale.US)
     private val lcdDayDateFormat = SimpleDateFormat("EEE d", Locale.ENGLISH)
