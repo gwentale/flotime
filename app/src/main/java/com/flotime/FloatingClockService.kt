@@ -144,12 +144,12 @@ internal class GShockClockRenderer(private val density: Float) {
     private val bezelOuterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val bezelLugPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val bezelRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val luxuryGoldRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val accentBlueRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
-    private val luxuryGoldFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val accentBlueFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val dialBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val innerRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
 
@@ -191,16 +191,16 @@ internal class GShockClockRenderer(private val density: Float) {
     private var cachedShaderCy = -1f
     private var cachedShaderR = -1f
     private var cachedShaderDark = true
-    private var goldShader: LinearGradient? = null
+    private var blueShader: LinearGradient? = null
 
     fun isTouchOnFormatBadge(x: Float, y: Float): Boolean {
         return (!badgeHitRect.isEmpty && badgeHitRect.contains(x, y)) ||
             (!amPmHitRect.isEmpty && amPmHitRect.contains(x, y))
     }
 
-    private fun ensureLuxuryGoldShader(cx: Float, cy: Float, outerR: Float, dark: Boolean) {
+    private fun ensureAccentBlueShader(cx: Float, cy: Float, outerR: Float, dark: Boolean) {
         if (
-            goldShader != null &&
+            blueShader != null &&
             abs(cx - cachedShaderCx) < 0.5f &&
             abs(cy - cachedShaderCy) < 0.5f &&
             abs(outerR - cachedShaderR) < 0.5f &&
@@ -215,19 +215,19 @@ internal class GShockClockRenderer(private val density: Float) {
 
         val colors = if (dark) {
             intArrayOf(
-                Color.parseColor("#FCE6A8"),
-                Color.parseColor("#D4AF37"),
-                Color.parseColor("#8A6623"),
-                Color.parseColor("#EED082"),
-                Color.parseColor("#B28735")
+                Color.parseColor("#93C5FD"),
+                Color.parseColor("#58A6FF"),
+                Color.parseColor("#1D4ED8"),
+                Color.parseColor("#60A5FA"),
+                Color.parseColor("#1690F3")
             )
         } else {
             intArrayOf(
-                Color.parseColor("#E6C574"),
-                Color.parseColor("#B98E2E"),
-                Color.parseColor("#7E5B18"),
-                Color.parseColor("#D9B55A"),
-                Color.parseColor("#9C7422")
+                Color.parseColor("#60A5FA"),
+                Color.parseColor("#1690F3"),
+                Color.parseColor("#0B5EC2"),
+                Color.parseColor("#38A1FF"),
+                Color.parseColor("#1375D6")
             )
         }
         val positions = floatArrayOf(0f, 0.25f, 0.52f, 0.78f, 1f)
@@ -240,9 +240,9 @@ internal class GShockClockRenderer(private val density: Float) {
             positions,
             Shader.TileMode.CLAMP
         )
-        goldShader = shader
-        luxuryGoldRingPaint.shader = shader
-        luxuryGoldFillPaint.shader = shader
+        blueShader = shader
+        accentBlueRingPaint.shader = shader
+        accentBlueFillPaint.shader = shader
         badgeStrokePaint.shader = shader
     }
 
@@ -264,19 +264,19 @@ internal class GShockClockRenderer(private val density: Float) {
         if (outerR <= 0f) return
 
         val dialR = outerR * 0.905f
-        ensureLuxuryGoldShader(cx, cy, outerR, dark)
+        ensureAccentBlueShader(cx, cy, outerR, dark)
 
         val bezelBaseColor = if (dark) Color.parseColor("#141820") else Color.parseColor("#E5ECF5")
         val bezelLugColor = if (dark) Color.parseColor("#1D2330") else Color.parseColor("#CFD9E8")
         val dialFaceColor = if (dark) Color.parseColor("#0D1117") else Color.parseColor("#FAFBFD")
-        val subtleRingColor = if (dark) Color.argb(65, 212, 175, 55) else Color.argb(82, 168, 128, 42)
+        val subtleRingColor = if (dark) Color.argb(72, 88, 166, 255) else Color.argb(82, 22, 144, 243)
         val subtleTickText = if (dark) Color.parseColor("#7D8A9E") else Color.parseColor("#94A3B8")
         val accentRed = Color.parseColor("#FF3B1D")
 
         val digitalBtnBlue = if (dark) Color.parseColor("#58A6FF") else Color.parseColor("#1690F3")
         val digitalBtnBlueSoft = if (dark) Color.argb(200, 88, 166, 255) else Color.argb(200, 22, 144, 243)
 
-        // 1. Classic sculpted bezel with 4 subtle bumper lugs + luxury gold border trim
+        // 1. Classic sculpted bezel with 4 subtle bumper lugs + metallic blue border trim
         bezelLugPaint.color = bezelLugColor
         for (lugAngle in intArrayOf(45, 135, 225, 315)) {
             canvas.save()
@@ -294,15 +294,15 @@ internal class GShockClockRenderer(private val density: Float) {
         bezelOuterPaint.color = bezelBaseColor
         canvas.drawCircle(cx, cy, outerR * 0.985f, bezelOuterPaint)
 
-        // Outer luxury metallic gold border list
-        luxuryGoldRingPaint.strokeWidth = max(1.8f * density, outerR * 0.022f)
-        canvas.drawCircle(cx, cy, outerR * 0.978f, luxuryGoldRingPaint)
+        // Outer metallic blue border list
+        accentBlueRingPaint.strokeWidth = max(1.8f * density, outerR * 0.022f)
+        canvas.drawCircle(cx, cy, outerR * 0.978f, accentBlueRingPaint)
 
-        // Inner bezel luxury gold pinstripe
-        luxuryGoldRingPaint.strokeWidth = max(1.1f * density, outerR * 0.013f)
-        canvas.drawCircle(cx, cy, dialR * 1.018f, luxuryGoldRingPaint)
+        // Inner bezel metallic blue pinstripe
+        accentBlueRingPaint.strokeWidth = max(1.1f * density, outerR * 0.013f)
+        canvas.drawCircle(cx, cy, dialR * 1.018f, accentBlueRingPaint)
 
-        // 2. Clean luxury dial face with subtle concentric horology rings
+        // 2. Clean dial face with subtle concentric horology rings
         dialBgPaint.color = dialFaceColor
         canvas.drawCircle(cx, cy, dialR, dialBgPaint)
 
@@ -310,11 +310,11 @@ internal class GShockClockRenderer(private val density: Float) {
         innerRingPaint.strokeWidth = max(0.85f * density, dialR * 0.0085f)
         canvas.drawCircle(cx, cy, dialR * 0.725f, innerRingPaint)
 
-        bezelRingPaint.color = if (dark) Color.argb(38, 212, 175, 55) else Color.argb(46, 168, 128, 42)
+        bezelRingPaint.color = if (dark) Color.argb(42, 88, 166, 255) else Color.argb(48, 22, 144, 243)
         bezelRingPaint.strokeWidth = max(0.65f * density, dialR * 0.006f)
         canvas.drawCircle(cx, cy, dialR * 0.675f, bezelRingPaint)
 
-        // Minimal luxury gold diamond crest below 12 o'clock
+        // Minimal blue diamond crest below 12 o'clock
         val crestY = cy - dialR * 0.42f
         val crestHalf = dialR * 0.028f
         pathTmp.reset()
@@ -323,7 +323,7 @@ internal class GShockClockRenderer(private val density: Float) {
         pathTmp.lineTo(cx, crestY + crestHalf)
         pathTmp.lineTo(cx - crestHalf * 0.75f, crestY)
         pathTmp.close()
-        canvas.drawPath(pathTmp, luxuryGoldFillPaint)
+        canvas.drawPath(pathTmp, accentBlueFillPaint)
 
         // 3. Outer 60 fine second ticks + 1..60 numbers (multiples of 5 red, others small & slim)
         for (i in 1..60) {
@@ -370,7 +370,7 @@ internal class GShockClockRenderer(private val density: Float) {
             )
         }
 
-        // 4. 12 Classic sculpted hour indices with luxury gold quarter inlay
+        // 4. 12 Classic sculpted hour indices with metallic blue quarter inlay
         val markerOuter = dialR * 0.812f
         val markerInner = dialR * 0.742f
         for (h in 0 until 12) {
@@ -402,7 +402,7 @@ internal class GShockClockRenderer(private val density: Float) {
                     cx + halfWInner * 0.44f,
                     cy - markerInner - dialR * 0.012f
                 )
-                canvas.drawRect(rectTmp, luxuryGoldFillPaint)
+                canvas.drawRect(rectTmp, accentBlueFillPaint)
             } else {
                 markerInnerPaint.color = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#334155")
                 rectTmp.set(
@@ -416,45 +416,7 @@ internal class GShockClockRenderer(private val density: Float) {
             canvas.restore()
         }
 
-        // 5. Aesthetic Luxury Gold Ornamental Divider (<—◆—>) aligned with clock center above digital time
-        val divY = cy + dialR * 0.172f
-        val divHalfLen = dialR * 0.34f
-        val divLeftX = cx - divHalfLen
-        val divRightX = cx + divHalfLen
-        val arrowW = dialR * 0.036f
-        val arrowH = dialR * 0.022f
-        val centerGem = dialR * 0.016f
-
-        luxuryGoldRingPaint.strokeWidth = max(1.0f * density, dialR * 0.0095f)
-        canvas.drawLine(divLeftX + arrowW * 0.2f, divY, cx - centerGem * 1.5f, divY, luxuryGoldRingPaint)
-        canvas.drawLine(cx + centerGem * 1.5f, divY, divRightX - arrowW * 0.2f, divY, luxuryGoldRingPaint)
-
-        // Left chevron "<"
-        pathTmp.reset()
-        pathTmp.moveTo(divLeftX + arrowW, divY - arrowH)
-        pathTmp.lineTo(divLeftX, divY)
-        pathTmp.lineTo(divLeftX + arrowW, divY + arrowH)
-        canvas.drawPath(pathTmp, luxuryGoldRingPaint)
-
-        // Right chevron ">"
-        pathTmp.reset()
-        pathTmp.moveTo(divRightX - arrowW, divY - arrowH)
-        pathTmp.lineTo(divRightX, divY)
-        pathTmp.lineTo(divRightX - arrowW, divY + arrowH)
-        canvas.drawPath(pathTmp, luxuryGoldRingPaint)
-
-        // Center micro diamond aligning vertically with center pin & 12-o'clock crest
-        pathTmp.reset()
-        pathTmp.moveTo(cx, divY - centerGem)
-        pathTmp.lineTo(cx + centerGem * 1.15f, divY)
-        pathTmp.lineTo(cx, divY + centerGem)
-        pathTmp.lineTo(cx - centerGem * 1.15f, divY)
-        pathTmp.close()
-        canvas.drawPath(pathTmp, luxuryGoldFillPaint)
-
-        // 6. Borderless Digital Time directly on dial
-        // Row 1: [24H] 13.50 48.5   OR   [12H] 01.50 48.5 [PM]
-        // Row 2: flotime | Sun 22
+        // 5. Measure Digital Time Row first so Ornamental Divider matches its exact left-right width
         val row1CenterY = cy + dialR * 0.315f
         val row2CenterY = cy + dialR * 0.475f
 
@@ -524,10 +486,50 @@ internal class GShockClockRenderer(private val density: Float) {
 
         val row1TotalW = leftBadgeBoxW + gapBadge + hmW + gapSec + secW + millisW +
             (if (!use24Hour) gapBadge + rightBadgeBoxW else 0f)
+
+        // 6. Aesthetic Metallic Blue Ornamental Divider (<—◆—>) spanning full left-right width of Row 1
+        val divY = cy + dialR * 0.172f
+        val divHalfLen = row1TotalW / 2f
+        val divLeftX = cx - divHalfLen
+        val divRightX = cx + divHalfLen
+        val arrowW = dialR * 0.036f
+        val arrowH = dialR * 0.022f
+        val centerGem = dialR * 0.016f
+
+        accentBlueRingPaint.strokeWidth = max(1.0f * density, dialR * 0.0095f)
+        canvas.drawLine(divLeftX + arrowW * 0.2f, divY, cx - centerGem * 1.5f, divY, accentBlueRingPaint)
+        canvas.drawLine(cx + centerGem * 1.5f, divY, divRightX - arrowW * 0.2f, divY, accentBlueRingPaint)
+
+        // Left chevron "<"
+        pathTmp.reset()
+        pathTmp.moveTo(divLeftX + arrowW, divY - arrowH)
+        pathTmp.lineTo(divLeftX, divY)
+        pathTmp.lineTo(divLeftX + arrowW, divY + arrowH)
+        canvas.drawPath(pathTmp, accentBlueRingPaint)
+
+        // Right chevron ">"
+        pathTmp.reset()
+        pathTmp.moveTo(divRightX - arrowW, divY - arrowH)
+        pathTmp.lineTo(divRightX, divY)
+        pathTmp.lineTo(divRightX - arrowW, divY + arrowH)
+        canvas.drawPath(pathTmp, accentBlueRingPaint)
+
+        // Center micro diamond aligned vertically with center pin & 12-o'clock crest
+        pathTmp.reset()
+        pathTmp.moveTo(cx, divY - centerGem)
+        pathTmp.lineTo(cx + centerGem * 1.15f, divY)
+        pathTmp.lineTo(cx, divY + centerGem)
+        pathTmp.lineTo(cx - centerGem * 1.15f, divY)
+        pathTmp.close()
+        canvas.drawPath(pathTmp, accentBlueFillPaint)
+
+        // 7. Borderless Digital Time directly on dial
+        // Row 1: [24H] 13:50 48.5   OR   [12H] 01:50 48.5 [PM]
+        // Row 2: flotime | Sun 22
         var cursorX = cx - (row1TotalW / 2f)
         val row1BaseY = row1CenterY - (hmFm.ascent + hmFm.descent) / 2f
 
-        val badgeFillColor = if (dark) Color.argb(70, 212, 175, 55) else Color.argb(38, 185, 142, 46)
+        val badgeFillColor = if (dark) Color.argb(56, 88, 166, 255) else Color.argb(32, 22, 144, 243)
         val badgeCorner = badgeBoxH * 0.28f
         badgeFillPaint.color = badgeFillColor
         badgeStrokePaint.strokeWidth = max(0.85f * density, dialR * 0.008f)
@@ -557,7 +559,7 @@ internal class GShockClockRenderer(private val density: Float) {
         canvas.drawText(badgeText, badgeDrawRect.centerX(), badgeTextY, textPaint)
         cursorX += leftBadgeBoxW + gapBadge
 
-        // Draw HH.mm (24H: 00..23) or hh.mm (Universal 12H: 12, 01..11)
+        // Draw HH:mm (24H: 00..23) or hh:mm (Universal 12H: 12, 01..11)
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.typeface = serifAcademicBold
         textPaint.textSize = hmSize
@@ -634,7 +636,7 @@ internal class GShockClockRenderer(private val density: Float) {
         textPaint.color = digitalBtnBlue
         canvas.drawText(dayDateStr, r2X, row2BaseY, textPaint)
 
-        // 7. Classic Sculpted Analog Hands (Discrete Quartz Ticking)
+        // 8. Classic Sculpted Analog Hands (Discrete Quartz Ticking)
         cal.timeInMillis = nowMillis
         val hour = cal.get(Calendar.HOUR)
         val minute = cal.get(Calendar.MINUTE)
@@ -700,8 +702,8 @@ internal class GShockClockRenderer(private val density: Float) {
             secHandPaint
         )
 
-        // Luxury gold-rimmed center pin cap
-        canvas.drawCircle(cx, cy, dialR * 0.060f, luxuryGoldFillPaint)
+        // Metallic blue-rimmed center pin cap
+        canvas.drawCircle(cx, cy, dialR * 0.060f, accentBlueFillPaint)
         capPaint.color = accentRed
         canvas.drawCircle(cx, cy, dialR * 0.036f, capPaint)
         capPaint.color = if (dark) Color.parseColor("#0F172A") else Color.WHITE
@@ -824,7 +826,7 @@ class FloatingClockService : Service() {
                 if (h12 == 0) 12 else h12
             }
             val minute = cal.get(Calendar.MINUTE)
-            return String.format(Locale.US, "%02d.%02d", displayHour, minute)
+            return String.format(Locale.US, "%02d:%02d", displayHour, minute)
         }
 
         fun formatClockSec(nowMs: Long): String {
@@ -1446,7 +1448,7 @@ class FloatingClockService : Service() {
 
     private fun applyDigitalFloatingTheme(dark: Boolean) {
         val cardBgColor = if (dark) Color.argb(214, 24, 30, 41) else Color.argb(236, 249, 251, 254)
-        val cardStrokeColor = if (dark) Color.argb(62, 255, 255, 255) else Color.argb(95, 148, 163, 184)
+        val cardStrokeColor = if (dark) Color.argb(72, 88, 166, 255) else Color.argb(95, 22, 144, 243)
         val primaryTextColor = if (dark) Color.parseColor("#F8FAFC") else Color.parseColor("#1E293B")
         val secondaryTextColor = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#475569")
         val millisColor = Color.parseColor("#FF3B1D")
@@ -2238,7 +2240,7 @@ class FloatingClockService : Service() {
         private val renderer = GShockClockRenderer(resources.displayMetrics.density)
 
         private var nowMillis = System.currentTimeMillis()
-        private var lcdHmStr = "12.00"
+        private var lcdHmStr = "12:00"
         private var lcdSecStr = "00"
         private var lcdMillisStr = "0"
         private var currentMillisDigits = 1
