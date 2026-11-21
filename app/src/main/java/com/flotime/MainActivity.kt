@@ -13,7 +13,6 @@ import android.graphics.ColorFilter
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
-import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
@@ -30,10 +29,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -51,7 +50,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
-import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.cos
@@ -93,8 +91,9 @@ class MainActivity : Activity() {
     private var hidePopupRunnable: Runnable? = null
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss.", Locale.US)
-    private val lcdTimeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val lcdDayDateFormat = SimpleDateFormat("EEEd", Locale.ENGLISH)
+    private val lcdHmFormat = SimpleDateFormat("HH:mm", Locale.US)
+    private val lcdSecFormat = SimpleDateFormat("ss", Locale.US)
+    private val lcdDayDateFormat = SimpleDateFormat("EEE d", Locale.ENGLISH)
     private val dateFormat = SimpleDateFormat("EEEE, dd/MM/yyyy", Locale.ENGLISH)
     private var permissionDialogRefreshAction: (() -> Unit)? = null
 
@@ -107,9 +106,44 @@ class MainActivity : Activity() {
     private val developerUrl = "https://youtu.be/dQw4w9WgXcQ"
     private val millisRedColor = Color.parseColor("#FF3B1D")
 
+    // Real VSync FPS meter via Choreographer
+    private var fpsActive = false
     private var fpsFrameCount = 0
-    private var fpsLastSampleMs = 0L
+    private var fpsLastSampleNanos = 0L
     private var currentFps = 60
+
+    private val fpsFrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!fpsActive || !isForeground || isFinishing || isDestroyed) return
+            if (fpsLastSampleNanos == 0L) {
+                fpsLastSampleNanos = frameTimeNanos
+            } else {
+                fpsFrameCount++
+                val elapsedNanos = frameTimeNanos - fpsLastSampleNanos
+                if (elapsedNanos >= 500_000_000L) {
+                    currentFps = ((fpsFrameCount * 1_000_000_000L) / elapsedNanos)
+                        .toInt()
+                        .coerceIn(1, 240)
+                    fpsFrameCount = 0
+                    fpsLastSampleNanos = frameTimeNanos
+                }
+            }
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    private fun syncFpsMonitor() {
+        val shouldRun = isForeground && isAnalogMode && FloatingClockService.showMetrics
+        if (shouldRun && !fpsActive) {
+            fpsActive = true
+            fpsFrameCount = 0
+            fpsLastSampleNanos = 0L
+            Choreographer.getInstance().postFrameCallback(fpsFrameCallback)
+        } else if (!shouldRun && fpsActive) {
+            fpsActive = false
+            Choreographer.getInstance().removeFrameCallback(fpsFrameCallback)
+        }
+    }
 
     private var prevRxBytes = 0L
     private var prevTxBytes = 0L
@@ -223,28 +257,15 @@ class MainActivity : Activity() {
             if (!isForeground || isFinishing || isDestroyed) return
             val now = FloatingClockService.getCurrentTimestamp()
             val nowReal = System.currentTimeMillis()
-            val hms = timeFormat.format(Date(now))
-            val dateStr = dateFormat.format(Date(now))
-            val fracStr = FloatingClockService.formatMillisFraction(now, FloatingClockService.millisDigits)
-
-            tvMainTimeHms.text = hms
-            tvMainTimeMillis.text = fracStr
-            tvMainDate.text = dateStr
-
-            fpsFrameCount++
-            val elapsedFps = SystemClock.uptimeMillis() - fpsLastSampleMs
-            if (elapsedFps >= 500L) {
-                currentFps = ((fpsFrameCount * 1000f) / elapsedFps).roundToInt().coerceIn(1, 240)
-                fpsFrameCount = 0
-                fpsLastSampleMs = SystemClock.uptimeMillis()
-            }
+            val nowDate = Date(now)
 
             if (isAnalogMode) {
                 updateLocalStatsIfNeeded(nowReal)
                 analogClockDrawable.updateState(
                     nowMillis = now,
-                    lcdTimeStr = lcdTimeFormat.format(Date(now)),
-                    dayDateStr = lcdDayDateFormat.format(Date(now)),
+                    lcdHmStr = lcdHmFormat.format(nowDate),
+                    lcdSecStr = lcdSecFormat.format(nowDate),
+                    dayDateStr = lcdDayDateFormat.format(nowDate),
                     fps = currentFps,
                     upText = homeUpSpeed,
                     downText = homeDownSpeed,
@@ -252,10 +273,20 @@ class MainActivity : Activity() {
                     cardinal = compassCardinal,
                     showStats = FloatingClockService.showMetrics
                 )
-            }
+                updateUiState()
+                mainHandler.postDelayed(this, 100L)
+            } else {
+                val hms = timeFormat.format(nowDate)
+                val dateStr = dateFormat.format(nowDate)
+                val fracStr = FloatingClockService.formatMillisFraction(now, FloatingClockService.millisDigits)
 
-            updateUiState()
-            mainHandler.postDelayed(this, if (FloatingClockService.millisDigits >= 2) 16L else 40L)
+                tvMainTimeHms.text = hms
+                tvMainTimeMillis.text = fracStr
+                tvMainDate.text = dateStr
+
+                updateUiState()
+                mainHandler.postDelayed(this, if (FloatingClockService.millisDigits >= 2) 16L else 40L)
+            }
         }
     }
 
@@ -317,13 +348,22 @@ class MainActivity : Activity() {
         prevRxBytes = TrafficStats.getTotalRxBytes()
         prevTxBytes = TrafficStats.getTotalTxBytes()
         prevStatsSampleMs = System.currentTimeMillis()
-        fpsLastSampleMs = SystemClock.uptimeMillis()
+        currentFps = getHomeRefreshRate()
 
         setupThemeToggleButton()
         setupPrecisionButton()
         updateThemeUI()
         applyMainClockPrecisionSizing()
         setupListeners()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun getHomeRefreshRate(): Int {
+        return try {
+            windowManager.defaultDisplay.refreshRate.roundToInt().coerceIn(30, 240)
+        } catch (_: Exception) {
+            60
+        }
     }
 
     override fun onResume() {
@@ -335,6 +375,7 @@ class MainActivity : Activity() {
         if (isAnalogMode) {
             registerCompassSensor()
         }
+        syncFpsMonitor()
         updateThemeUI()
         applyMainClockPrecisionSizing()
         updateUiState()
@@ -346,6 +387,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         isForeground = false
+        syncFpsMonitor()
         unregisterCompassSensor()
         mainHandler.removeCallbacks(mainClockRunnable)
         mainHandler.removeCallbacks(mainTickRunnable)
@@ -353,6 +395,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         isForeground = false
+        syncFpsMonitor()
         unregisterCompassSensor()
         mainHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -648,6 +691,7 @@ class MainActivity : Activity() {
             } else {
                 FloatingClockService.showMetrics = !FloatingClockService.showMetrics
             }
+            syncFpsMonitor()
             analogClockDrawable.invalidateSelf()
             btnToggleMetrics.postDelayed({ updateUiState() }, 100)
         }
@@ -675,14 +719,17 @@ class MainActivity : Activity() {
                 layoutDigitalClock.visibility = View.GONE
                 viewAnalogClock.visibility = View.VISIBLE
                 registerCompassSensor()
+                syncFpsMonitor()
                 prevRxBytes = TrafficStats.getTotalRxBytes()
                 prevTxBytes = TrafficStats.getTotalTxBytes()
                 prevStatsSampleMs = System.currentTimeMillis()
                 val now = FloatingClockService.getCurrentTimestamp()
+                val nowDate = Date(now)
                 analogClockDrawable.updateState(
                     nowMillis = now,
-                    lcdTimeStr = lcdTimeFormat.format(Date(now)),
-                    dayDateStr = lcdDayDateFormat.format(Date(now)),
+                    lcdHmStr = lcdHmFormat.format(nowDate),
+                    lcdSecStr = lcdSecFormat.format(nowDate),
+                    dayDateStr = lcdDayDateFormat.format(nowDate),
                     fps = currentFps,
                     upText = homeUpSpeed,
                     downText = homeDownSpeed,
@@ -692,9 +739,11 @@ class MainActivity : Activity() {
                 )
             } else {
                 unregisterCompassSensor()
+                syncFpsMonitor()
                 layoutDigitalClock.visibility = View.VISIBLE
                 viewAnalogClock.visibility = View.GONE
             }
+            startMainClockLoop()
         }
     }
 
@@ -1806,10 +1855,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private inner class AnalogClockDrawable(private val density: Float) : Drawable() {
+    private inner class AnalogClockDrawable(density: Float) : Drawable() {
+        private val renderer = GShockClockRenderer(density)
+
         private var timeMillis: Long = System.currentTimeMillis()
-        private var lcdTimeStr: String = "00:00:00"
-        private var dayDateStr: String = "Sat21"
+        private var lcdHmStr: String = "00:00"
+        private var lcdSecStr: String = "00"
+        private var dayDateStr: String = "Sat 21"
         private var fpsValue: Int = 60
         private var upText: String = "0.00 KB/s"
         private var downText: String = "0.00 KB/s"
@@ -1817,45 +1869,6 @@ class MainActivity : Activity() {
         private var cardinalStr: String = "N"
         private var showStats: Boolean = true
         private var dark: Boolean = false
-
-        private val cal = Calendar.getInstance()
-        private val lcdRect = RectF()
-        private val subRect = RectF()
-
-        private val bezelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        private val bezelBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2.2f * density
-        }
-        private val dialPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        private val subDialPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        private val lcdBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        private val lcdBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1.4f * density
-        }
-        private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-        }
-        private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            isSubpixelText = true
-        }
-        private val handPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-        }
-        private val centerCapPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
 
         fun setDarkTheme(isDark: Boolean) {
             if (dark != isDark) {
@@ -1866,7 +1879,8 @@ class MainActivity : Activity() {
 
         fun updateState(
             nowMillis: Long,
-            lcdTimeStr: String,
+            lcdHmStr: String,
+            lcdSecStr: String,
             dayDateStr: String,
             fps: Int,
             upText: String,
@@ -1876,7 +1890,8 @@ class MainActivity : Activity() {
             showStats: Boolean
         ) {
             this.timeMillis = nowMillis
-            this.lcdTimeStr = lcdTimeStr
+            this.lcdHmStr = lcdHmStr
+            this.lcdSecStr = lcdSecStr
             this.dayDateStr = dayDateStr
             this.fpsValue = fps
             this.upText = upText
@@ -1888,207 +1903,29 @@ class MainActivity : Activity() {
         }
 
         override fun draw(canvas: Canvas) {
-            val cx = bounds.exactCenterX()
-            val cy = bounds.exactCenterY()
-            val outerR = (bounds.width().coerceAtMost(bounds.height()) / 2f) * 0.94f
+            val outerR = (bounds.width().coerceAtMost(bounds.height()) / 2f) * 0.96f
             if (outerR <= 0f) return
-            val dialR = outerR * 0.85f
-
-            bezelPaint.color = if (dark) Color.parseColor("#1A202C") else Color.parseColor("#E6ECF5")
-            bezelBorderPaint.color = if (dark) Color.parseColor("#3B4559") else Color.parseColor("#C7D4E6")
-            dialPaint.color = if (dark) Color.parseColor("#11151C") else Color.parseColor("#FFFFFF")
-            subDialPaint.color = if (dark) Color.parseColor("#181E28") else Color.parseColor("#F1F5F9")
-            lcdBoxPaint.color = if (dark) Color.parseColor("#1A222E") else Color.parseColor("#EFF4FA")
-            lcdBorderPaint.color = if (dark) Color.parseColor("#334155") else Color.parseColor("#CBD5E1")
-
-            canvas.drawCircle(cx, cy, outerR, bezelPaint)
-            canvas.drawCircle(cx, cy, outerR, bezelBorderPaint)
-            canvas.drawCircle(cx, cy, dialR, dialPaint)
-
-            for (i in 0 until 60) {
-                val angle = Math.toRadians((i * 6).toDouble())
-                val isHour = i % 5 == 0
-                val isQuarter = i % 15 == 0
-                val innerFactor = when {
-                    isQuarter -> 0.82f
-                    isHour -> 0.86f
-                    else -> 0.92f
-                }
-                tickPaint.color = when {
-                    isQuarter -> if (dark) Color.parseColor("#E2E8F0") else Color.parseColor("#1E293B")
-                    isHour -> if (dark) Color.parseColor("#94A3B8") else Color.parseColor("#64748B")
-                    else -> if (dark) Color.parseColor("#475569") else Color.parseColor("#CBD5E1")
-                }
-                tickPaint.strokeWidth = when {
-                    isQuarter -> 2.8f * density
-                    isHour -> 2.0f * density
-                    else -> 1.1f * density
-                }
-                val rIn = dialR * innerFactor
-                val rOut = dialR * 0.98f
-                canvas.drawLine(
-                    cx + (rIn * sin(angle)).toFloat(),
-                    cy - (rIn * cos(angle)).toFloat(),
-                    cx + (rOut * sin(angle)).toFloat(),
-                    cy - (rOut * cos(angle)).toFloat(),
-                    tickPaint
-                )
-            }
-
-            val textBright = if (dark) Color.parseColor("#F8FAFC") else Color.parseColor("#1F2430")
-            val textSub = if (dark) Color.parseColor("#94A3B8") else Color.parseColor("#64748B")
-            val accentSky = if (dark) Color.parseColor("#38BDF8") else Color.parseColor("#1690F3")
-
-            if (showStats) {
-                labelPaint.textAlign = Paint.Align.CENTER
-                labelPaint.color = accentSky
-                labelPaint.textSize = 11f * density
-                labelPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-                canvas.drawText(
-                    "$cardinalStr ${azimuthDeg.roundToInt()}°",
-                    cx,
-                    cy - dialR * 0.64f,
-                    labelPaint
-                )
-
-                labelPaint.textAlign = Paint.Align.LEFT
-                val leftInfoX = cx - dialR * 0.64f
-                labelPaint.color = textBright
-                labelPaint.textSize = 11f * density
-                labelPaint.typeface = Typeface.DEFAULT_BOLD
-                canvas.drawText("${fpsValue} FPS", leftInfoX, cy - dialR * 0.24f, labelPaint)
-
-                labelPaint.color = textSub
-                labelPaint.textSize = 8.5f * density
-                labelPaint.typeface = Typeface.DEFAULT_BOLD
-                canvas.drawText("FPS METER", leftInfoX, cy - dialR * 0.10f, labelPaint)
-
-                labelPaint.color = textBright
-                labelPaint.textSize = 8.5f * density
-                labelPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-                canvas.drawText("↑ $upText", leftInfoX, cy + dialR * 0.14f, labelPaint)
-                canvas.drawText("↓ $downText", leftInfoX, cy + dialR * 0.27f, labelPaint)
-
-                labelPaint.color = accentSky
-                labelPaint.textSize = 8.5f * density
-                labelPaint.typeface = Typeface.DEFAULT_BOLD
-                canvas.drawText("UL/DL", leftInfoX, cy + dialR * 0.40f, labelPaint)
-
-                val subCx = cx + dialR * 0.42f
-                val subCy = cy - dialR * 0.16f
-                val subR = dialR * 0.27f
-                subRect.set(subCx - subR, subCy - subR, subCx + subR, subCy + subR)
-                canvas.drawCircle(subCx, subCy, subR, subDialPaint)
-                canvas.drawCircle(subCx, subCy, subR, lcdBorderPaint)
-
-                val sweepRad = Math.toRadians(azimuthDeg.toDouble())
-                handPaint.color = millisRedColor
-                handPaint.strokeWidth = 1.8f * density
-                canvas.drawLine(
-                    subCx,
-                    subCy,
-                    subCx + (subR * 0.78f * sin(sweepRad)).toFloat(),
-                    subCy - (subR * 0.78f * cos(sweepRad)).toFloat(),
-                    handPaint
-                )
-                centerCapPaint.color = millisRedColor
-                canvas.drawCircle(subCx, subCy, 2.5f * density, centerCapPaint)
-            }
-
-            // Bottom digital LCD window (Digital time + Sat21)
-            val lcdW = dialR * 1.05f
-            val lcdH = dialR * 0.34f
-            val lcdTop = cy + dialR * 0.45f
-            lcdRect.set(cx - lcdW / 2f, lcdTop, cx + lcdW / 2f, lcdTop + lcdH)
-            canvas.drawRoundRect(lcdRect, 6f * density, 6f * density, lcdBoxPaint)
-            canvas.drawRoundRect(lcdRect, 6f * density, 6f * density, lcdBorderPaint)
-
-            labelPaint.textAlign = Paint.Align.CENTER
-            labelPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            labelPaint.color = textBright
-            labelPaint.textSize = 11f * density
-            canvas.drawText(lcdTimeStr, cx, lcdTop + lcdH * 0.44f, labelPaint)
-
-            labelPaint.color = textSub
-            labelPaint.textSize = 8.8f * density
-            canvas.drawText(dayDateStr, cx, lcdTop + lcdH * 0.84f, labelPaint)
-
-            // Analog hands
-            cal.timeInMillis = timeMillis
-            val hour = cal.get(Calendar.HOUR)
-            val minute = cal.get(Calendar.MINUTE)
-            val second = cal.get(Calendar.SECOND)
-            val millis = cal.get(Calendar.MILLISECOND)
-
-            val hourDeg = ((hour + minute / 60f) * 30f).toDouble()
-            val minDeg = ((minute + second / 60f) * 6f).toDouble()
-            val secDeg = ((second + millis / 1000f) * 6f).toDouble()
-
-            val hRad = Math.toRadians(hourDeg)
-            handPaint.color = textBright
-            handPaint.strokeWidth = 4.2f * density
-            canvas.drawLine(
-                cx - (dialR * 0.10f * sin(hRad)).toFloat(),
-                cy + (dialR * 0.10f * cos(hRad)).toFloat(),
-                cx + (dialR * 0.46f * sin(hRad)).toFloat(),
-                cy - (dialR * 0.46f * cos(hRad)).toFloat(),
-                handPaint
+            renderer.draw(
+                canvas = canvas,
+                cx = bounds.exactCenterX(),
+                cy = bounds.exactCenterY(),
+                outerR = outerR,
+                nowMillis = timeMillis,
+                lcdHmStr = lcdHmStr,
+                lcdSecStr = lcdSecStr,
+                dayDateStr = dayDateStr,
+                fpsValue = fpsValue,
+                upText = upText,
+                downText = downText,
+                azimuthDeg = azimuthDeg,
+                cardinalStr = cardinalStr,
+                showStats = showStats,
+                dark = dark
             )
-
-            val mRad = Math.toRadians(minDeg)
-            handPaint.color = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#475569")
-            handPaint.strokeWidth = 3.0f * density
-            canvas.drawLine(
-                cx - (dialR * 0.12f * sin(mRad)).toFloat(),
-                cy + (dialR * 0.12f * cos(mRad)).toFloat(),
-                cx + (dialR * 0.68f * sin(mRad)).toFloat(),
-                cy - (dialR * 0.68f * cos(mRad)).toFloat(),
-                handPaint
-            )
-
-            val sRad = Math.toRadians(secDeg)
-            handPaint.color = millisRedColor
-            handPaint.strokeWidth = 1.8f * density
-            canvas.drawLine(
-                cx - (dialR * 0.16f * sin(sRad)).toFloat(),
-                cy + (dialR * 0.16f * cos(sRad)).toFloat(),
-                cx + (dialR * 0.78f * sin(sRad)).toFloat(),
-                cy - (dialR * 0.78f * cos(sRad)).toFloat(),
-                handPaint
-            )
-
-            centerCapPaint.color = millisRedColor
-            canvas.drawCircle(cx, cy, 4.4f * density, centerCapPaint)
-            centerCapPaint.color = if (dark) Color.parseColor("#11151C") else Color.WHITE
-            canvas.drawCircle(cx, cy, 1.6f * density, centerCapPaint)
         }
 
-        override fun setAlpha(alpha: Int) {
-            bezelPaint.alpha = alpha
-            bezelBorderPaint.alpha = alpha
-            dialPaint.alpha = alpha
-            subDialPaint.alpha = alpha
-            lcdBoxPaint.alpha = alpha
-            lcdBorderPaint.alpha = alpha
-            tickPaint.alpha = alpha
-            labelPaint.alpha = alpha
-            handPaint.alpha = alpha
-            centerCapPaint.alpha = alpha
-        }
-
-        override fun setColorFilter(cf: ColorFilter?) {
-            bezelPaint.colorFilter = cf
-            bezelBorderPaint.colorFilter = cf
-            dialPaint.colorFilter = cf
-            subDialPaint.colorFilter = cf
-            lcdBoxPaint.colorFilter = cf
-            lcdBorderPaint.colorFilter = cf
-            tickPaint.colorFilter = cf
-            labelPaint.colorFilter = cf
-            handPaint.colorFilter = cf
-            centerCapPaint.colorFilter = cf
-        }
-
+        override fun setAlpha(alpha: Int) {}
+        override fun setColorFilter(cf: ColorFilter?) {}
         @Deprecated("Deprecated in Java")
         override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
     }
