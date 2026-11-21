@@ -14,19 +14,16 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.CornerPathEffect
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.Icon
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
-import android.hardware.display.DisplayManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -39,13 +36,12 @@ import android.os.Looper
 import android.os.Process
 import android.util.DisplayMetrics
 import android.util.TypedValue
-import android.view.Choreographer
-import android.view.Display
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -66,76 +62,6 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-internal class DynamicRefreshRateMonitor(
-    private val maxHzProvider: () -> Int,
-    private val onRateChanged: (Int) -> Unit
-) : Choreographer.FrameCallback {
-
-    private val ringSize = 256
-    private val frameTimes = LongArray(ringSize)
-    private var head = 0
-    private var tail = 0
-    private var count = 0
-    private var lastEmitNanos = 0L
-    private var lastEmittedHz = -1
-    private var running = false
-
-    fun start() {
-        if (running) return
-        running = true
-        head = 0
-        tail = 0
-        count = 0
-        lastEmitNanos = 0L
-        lastEmittedHz = -1
-        Choreographer.getInstance().postFrameCallback(this)
-    }
-
-    fun stop() {
-        if (!running) return
-        running = false
-        Choreographer.getInstance().removeFrameCallback(this)
-    }
-
-    override fun doFrame(frameTimeNanos: Long) {
-        if (!running) return
-
-        if (count == ringSize) {
-            head = (head + 1) % ringSize
-            count--
-        }
-        frameTimes[tail] = frameTimeNanos
-        tail = (tail + 1) % ringSize
-        count++
-
-        val windowStart = frameTimeNanos - 1_000_000_000L
-        while (count > 1 && frameTimes[head] < windowStart) {
-            head = (head + 1) % ringSize
-            count--
-        }
-
-        if (lastEmitNanos == 0L) {
-            lastEmitNanos = frameTimeNanos
-        } else if (frameTimeNanos - lastEmitNanos >= 250_000_000L && count >= 2) {
-            val oldest = frameTimes[head]
-            val spanNanos = frameTimeNanos - oldest
-            if (spanNanos >= 150_000_000L) {
-                val maxCap = maxHzProvider().coerceIn(60, 240)
-                val measuredHz = (((count - 1).toDouble() * 1_000_000_000.0) / spanNanos.toDouble())
-                    .roundToInt()
-                    .coerceIn(1, maxCap)
-                lastEmitNanos = frameTimeNanos
-                if (measuredHz != lastEmittedHz) {
-                    lastEmittedHz = measuredHz
-                    onRateChanged(measuredHz)
-                }
-            }
-        }
-
-        Choreographer.getInstance().postFrameCallback(this)
-    }
-}
-
 internal class GShockClockRenderer(private val density: Float) {
     private val cal = Calendar.getInstance()
     private val sansSlim = Typeface.create("sans-serif", Typeface.NORMAL)
@@ -146,11 +72,10 @@ internal class GShockClockRenderer(private val density: Float) {
     private val bezelOuterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val bezelLugPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val bezelRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val luxuryGoldRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val luxuryGoldFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val dialBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val innerRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-
-    private val subDialRecessPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val subDialRingFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -159,11 +84,10 @@ internal class GShockClockRenderer(private val density: Float) {
     private val markerFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val markerInnerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
-    private val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val cardBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val lcdBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val lcdBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private var lastLcdCornerPx = -1f
+    private val badgeFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val badgeStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
 
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         isSubpixelText = true
@@ -183,9 +107,71 @@ internal class GShockClockRenderer(private val density: Float) {
     private val capPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     private val rectTmp = RectF()
+    private val badgeDrawRect = RectF()
+    private val badgeHitRect = RectF()
     private val pathTmp = Path()
     private val pathLume = Path()
     private val lcdPath = Path()
+
+    private var cachedShaderCx = -1f
+    private var cachedShaderCy = -1f
+    private var cachedShaderR = -1f
+    private var cachedShaderDark = true
+    private var lastLcdCornerPx = -1f
+    private var goldShader: LinearGradient? = null
+
+    fun isTouchOnFormatBadge(x: Float, y: Float): Boolean {
+        return !badgeHitRect.isEmpty && badgeHitRect.contains(x, y)
+    }
+
+    private fun ensureLuxuryGoldShader(cx: Float, cy: Float, outerR: Float, dark: Boolean) {
+        if (
+            goldShader != null &&
+            abs(cx - cachedShaderCx) < 0.5f &&
+            abs(cy - cachedShaderCy) < 0.5f &&
+            abs(outerR - cachedShaderR) < 0.5f &&
+            dark == cachedShaderDark
+        ) {
+            return
+        }
+        cachedShaderCx = cx
+        cachedShaderCy = cy
+        cachedShaderR = outerR
+        cachedShaderDark = dark
+
+        val colors = if (dark) {
+            intArrayOf(
+                Color.parseColor("#FCE6A8"),
+                Color.parseColor("#D4AF37"),
+                Color.parseColor("#8A6623"),
+                Color.parseColor("#EED082"),
+                Color.parseColor("#B28735")
+            )
+        } else {
+            intArrayOf(
+                Color.parseColor("#E6C574"),
+                Color.parseColor("#B98E2E"),
+                Color.parseColor("#7E5B18"),
+                Color.parseColor("#D9B55A"),
+                Color.parseColor("#9C7422")
+            )
+        }
+        val positions = floatArrayOf(0f, 0.25f, 0.52f, 0.78f, 1f)
+        val shader = LinearGradient(
+            cx - outerR,
+            cy - outerR,
+            cx + outerR,
+            cy + outerR,
+            colors,
+            positions,
+            Shader.TileMode.CLAMP
+        )
+        goldShader = shader
+        luxuryGoldRingPaint.shader = shader
+        luxuryGoldFillPaint.shader = shader
+        lcdBorderPaint.shader = shader
+        badgeStrokePaint.shader = shader
+    }
 
     fun draw(
         canvas: Canvas,
@@ -195,36 +181,32 @@ internal class GShockClockRenderer(private val density: Float) {
         nowMillis: Long,
         lcdHmStr: String,
         lcdSecStr: String,
+        lcdMillisStr: String,
+        millisDigits: Int,
         dayDateStr: String,
-        hzValue: Int,
-        upText: String,
-        downText: String,
-        azimuthDeg: Float,
-        cardinalStr: String,
-        showStats: Boolean,
+        use24Hour: Boolean,
+        amPmStr: String,
         dark: Boolean
     ) {
         if (outerR <= 0f) return
 
         val dialR = outerR * 0.905f
+        ensureLuxuryGoldShader(cx, cy, outerR, dark)
 
-        val bezelBaseColor = if (dark) Color.parseColor("#181C24") else Color.parseColor("#DCE3EE")
-        val bezelLugColor = if (dark) Color.parseColor("#232936") else Color.parseColor("#C7D3E3")
-        val bezelMetalRing = if (dark) Color.parseColor("#475569") else Color.parseColor("#94A3B8")
-        val dialFaceColor = if (dark) Color.parseColor("#10141B") else Color.parseColor("#F8FAFD")
-        val chapterStrokeColor = if (dark) Color.parseColor("#263042") else Color.parseColor("#CBD5E1")
-
+        val bezelBaseColor = if (dark) Color.parseColor("#141820") else Color.parseColor("#E2E8F2")
+        val bezelLugColor = if (dark) Color.parseColor("#1D2330") else Color.parseColor("#CBD6E6")
+        val dialFaceColor = if (dark) Color.parseColor("#0D1117") else Color.parseColor("#F9FBFE")
+        val subtleRingColor = if (dark) Color.argb(65, 212, 175, 55) else Color.argb(75, 168, 128, 42)
         val subtleTickText = if (dark) Color.parseColor("#7D8A9E") else Color.parseColor("#94A3B8")
-        val compassTextColor = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#475569")
         val accentRed = Color.parseColor("#FF3B1D")
 
-        // Unified Digital button palette for Network Stats, Hz, and LCD columns
+        // Matches Digital button theme colors
         val digitalBtnBg = if (dark) Color.parseColor("#1E2430") else Color.parseColor("#FFFFFF")
         val digitalBtnStroke = if (dark) Color.parseColor("#2D3548") else Color.parseColor("#D8E2EE")
         val digitalBtnBlue = if (dark) Color.parseColor("#58A6FF") else Color.parseColor("#1690F3")
-        val digitalBtnBlueSoft = if (dark) Color.argb(195, 88, 166, 255) else Color.argb(195, 22, 144, 243)
+        val digitalBtnBlueSoft = if (dark) Color.argb(200, 88, 166, 255) else Color.argb(200, 22, 144, 243)
 
-        // 1. Classic G-Shock layered bezel with 4 subtle bumper lugs
+        // 1. Classic sculpted bezel with 4 subtle bumper lugs + luxury gold border trim
         bezelLugPaint.color = bezelLugColor
         for (lugAngle in intArrayOf(45, 135, 225, 315)) {
             canvas.save()
@@ -242,21 +224,38 @@ internal class GShockClockRenderer(private val density: Float) {
         bezelOuterPaint.color = bezelBaseColor
         canvas.drawCircle(cx, cy, outerR * 0.985f, bezelOuterPaint)
 
-        bezelRingPaint.color = bezelMetalRing
-        bezelRingPaint.strokeWidth = max(1.2f * density, outerR * 0.016f)
-        canvas.drawCircle(cx, cy, outerR * 0.980f, bezelRingPaint)
+        // Outer luxury metallic gold border list
+        luxuryGoldRingPaint.strokeWidth = max(1.8f * density, outerR * 0.022f)
+        canvas.drawCircle(cx, cy, outerR * 0.978f, luxuryGoldRingPaint)
 
-        bezelRingPaint.color = if (dark) Color.parseColor("#334155") else Color.parseColor("#B0C0D6")
-        bezelRingPaint.strokeWidth = max(1.0f * density, outerR * 0.012f)
-        canvas.drawCircle(cx, cy, dialR * 1.015f, bezelRingPaint)
+        // Inner bezel luxury gold pinstripe
+        luxuryGoldRingPaint.strokeWidth = max(1.1f * density, outerR * 0.013f)
+        canvas.drawCircle(cx, cy, dialR * 1.018f, luxuryGoldRingPaint)
 
-        // 2. Main dial face
+        // 2. Clean luxury dial face with subtle concentric horology rings
         dialBgPaint.color = dialFaceColor
         canvas.drawCircle(cx, cy, dialR, dialBgPaint)
 
-        innerRingPaint.color = chapterStrokeColor
-        innerRingPaint.strokeWidth = max(0.8f * density, dialR * 0.008f)
+        // Fine luxury gold chapter ring separating markers & center dial
+        innerRingPaint.color = subtleRingColor
+        innerRingPaint.strokeWidth = max(0.85f * density, dialR * 0.0085f)
         canvas.drawCircle(cx, cy, dialR * 0.725f, innerRingPaint)
+
+        // Subtle decorative inner guilloche ring in upper open space
+        bezelRingPaint.color = if (dark) Color.argb(38, 212, 175, 55) else Color.argb(42, 168, 128, 42)
+        bezelRingPaint.strokeWidth = max(0.65f * density, dialR * 0.006f)
+        canvas.drawCircle(cx, cy, dialR * 0.675f, bezelRingPaint)
+
+        // Minimal luxury gold diamond crest below 12 o'clock
+        val crestY = cy - dialR * 0.42f
+        val crestHalf = dialR * 0.028f
+        pathTmp.reset()
+        pathTmp.moveTo(cx, crestY - crestHalf)
+        pathTmp.lineTo(cx + crestHalf * 0.75f, crestY)
+        pathTmp.lineTo(cx, crestY + crestHalf)
+        pathTmp.lineTo(cx - crestHalf * 0.75f, crestY)
+        pathTmp.close()
+        canvas.drawPath(pathTmp, luxuryGoldFillPaint)
 
         // 3. Outer 60 fine second ticks + 1..60 numbers (multiples of 5 red, others small & slim)
         for (i in 1..60) {
@@ -303,7 +302,7 @@ internal class GShockClockRenderer(private val density: Float) {
             )
         }
 
-        // 4. 12 Classic G-Shock trapezoid hour indices
+        // 4. 12 Classic sculpted hour indices with luxury gold quarter inlay
         val markerOuter = dialR * 0.812f
         val markerInner = dialR * 0.742f
         for (h in 0 until 12) {
@@ -322,179 +321,41 @@ internal class GShockClockRenderer(private val density: Float) {
             pathTmp.close()
 
             markerFillPaint.color = if (dark) {
-                if (isQuarter) Color.parseColor("#94A3B8") else Color.parseColor("#64748B")
+                if (isQuarter) Color.parseColor("#A3B1C6") else Color.parseColor("#64748B")
             } else {
                 if (isQuarter) Color.parseColor("#475569") else Color.parseColor("#94A3B8")
             }
             canvas.drawPath(pathTmp, markerFillPaint)
 
             if (isQuarter) {
-                markerInnerPaint.color = if (dark) Color.parseColor("#E2E8F0") else Color.parseColor("#1E293B")
                 rectTmp.set(
-                    cx - halfWInner * 0.48f,
+                    cx - halfWInner * 0.44f,
                     cy - markerOuter + dialR * 0.012f,
-                    cx + halfWInner * 0.48f,
+                    cx + halfWInner * 0.44f,
                     cy - markerInner - dialR * 0.012f
+                )
+                canvas.drawRect(rectTmp, luxuryGoldFillPaint)
+            } else {
+                markerInnerPaint.color = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#334155")
+                rectTmp.set(
+                    cx - halfWInner * 0.25f,
+                    cy - markerOuter + dialR * 0.016f,
+                    cx + halfWInner * 0.25f,
+                    cy - markerInner - dialR * 0.016f
                 )
                 canvas.drawRect(rectTmp, markerInnerPaint)
             }
             canvas.restore()
         }
 
-        cardBgPaint.color = digitalBtnBg
-        cardBorderPaint.color = digitalBtnStroke
-        cardBorderPaint.strokeWidth = max(1.0f * density, dialR * 0.010f)
-
-        // 5. Stats: G-Shock Compass Subdial (upper-right, no degrees) + Left-Aligned Network Stats (top) & Hz (bottom)
-        if (showStats) {
-            val boxCorner = dialR * 0.048f
-            val leftEdge = cx - dialR * 0.585f
-            val textPadX = dialR * 0.042f
-            val statTextSize = dialR * 0.060f
-
-            // --- Network Stats Column (TOP, left-aligned) ---
-            rectTmp.set(
-                leftEdge,
-                cy - dialR * 0.345f,
-                cx - dialR * 0.095f,
-                cy - dialR * 0.095f
-            )
-            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBgPaint)
-            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBorderPaint)
-
-            textPaint.textAlign = Paint.Align.LEFT
-            textPaint.typeface = serifAcademic
-            textPaint.textSize = statTextSize
-            textPaint.color = digitalBtnBlue
-            val statFm = textPaint.fontMetrics
-            val statYOff = -(statFm.ascent + statFm.descent) / 2f
-
-            canvas.drawText("↑ $upText", rectTmp.left + textPadX, rectTmp.top + rectTmp.height() * 0.32f + statYOff, textPaint)
-            canvas.drawText("↓ $downText", rectTmp.left + textPadX, rectTmp.top + rectTmp.height() * 0.70f + statYOff, textPaint)
-
-            // --- Dynamic Refresh Rate Column (BELOW Network Stats, left-aligned) ---
-            rectTmp.set(
-                leftEdge,
-                cy - dialR * 0.040f,
-                cx - dialR * 0.255f,
-                cy + dialR * 0.130f
-            )
-            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBgPaint)
-            canvas.drawRoundRect(rectTmp, boxCorner, boxCorner, cardBorderPaint)
-
-            textPaint.textAlign = Paint.Align.LEFT
-            textPaint.typeface = serifAcademicBold
-            textPaint.textSize = dialR * 0.068f
-            textPaint.color = digitalBtnBlue
-            val hzFm = textPaint.fontMetrics
-            val hzY = rectTmp.centerY() - (hzFm.ascent + hzFm.descent) / 2f
-            canvas.drawText("${hzValue}Hz", rectTmp.left + textPadX, hzY, textPaint)
-
-            // --- Classic G-Shock Layered Compass Subdial (upper-right, matching reference size & shape, no degree text) ---
-            val subCx = cx + dialR * 0.295f
-            val subCy = cy - dialR * 0.270f
-            val subR = dialR * 0.280f
-
-            // Outer recessed well
-            subDialRecessPaint.color = if (dark) Color.parseColor("#171C25") else Color.parseColor("#E6EDF6")
-            canvas.drawCircle(subCx, subCy, subR, subDialRecessPaint)
-
-            innerRingPaint.color = if (dark) Color.parseColor("#3B475C") else Color.parseColor("#B5C4D8")
-            innerRingPaint.strokeWidth = max(1.1f * density, subR * 0.045f)
-            canvas.drawCircle(subCx, subCy, subR, innerRingPaint)
-
-            // Raised metallic-style inner ring (signature G-Shock subdial ring)
-            subDialRingFillPaint.color = if (dark) Color.parseColor("#242C3A") else Color.parseColor("#D4DFEE")
-            canvas.drawCircle(subCx, subCy, subR * 0.68f, subDialRingFillPaint)
-
-            // Inner dark core
-            subDialRecessPaint.color = dialFaceColor
-            canvas.drawCircle(subCx, subCy, subR * 0.48f, subDialRecessPaint)
-
-            innerRingPaint.color = if (dark) Color.parseColor("#526078") else Color.parseColor("#94A3B8")
-            innerRingPaint.strokeWidth = max(0.85f * density, subR * 0.032f)
-            canvas.drawCircle(subCx, subCy, subR * 0.68f, innerRingPaint)
-            canvas.drawCircle(subCx, subCy, subR * 0.48f, innerRingPaint)
-
-            // 24 crisp perimeter ticks on the subdial track
-            for (t in 0 until 24) {
-                val a = Math.toRadians((t * 15).toDouble())
-                val isCardinal = t % 6 == 0
-                val isSub = t % 3 == 0
-                val r1 = subR * when {
-                    isCardinal -> 0.72f
-                    isSub -> 0.78f
-                    else -> 0.84f
-                }
-                val r2 = subR * 0.94f
-                tickPaint.color = when {
-                    t == 0 -> accentRed
-                    isCardinal -> compassTextColor
-                    else -> subtleTickText
-                }
-                tickPaint.strokeWidth = when {
-                    isCardinal -> max(1.2f * density, subR * 0.048f)
-                    isSub -> max(0.9f * density, subR * 0.032f)
-                    else -> max(0.65f * density, subR * 0.022f)
-                }
-                canvas.drawLine(
-                    subCx + (r1 * sin(a)).toFloat(),
-                    subCy - (r1 * cos(a)).toFloat(),
-                    subCx + (r2 * sin(a)).toFloat(),
-                    subCy - (r2 * cos(a)).toFloat(),
-                    tickPaint
-                )
-            }
-
-            // Cardinal letters N / E / S / W on the stepped track
-            val cardR = subR * 0.58f
-            textPaint.textAlign = Paint.Align.CENTER
-            textPaint.typeface = sansMedium
-            textPaint.textSize = subR * 0.21f
-            val cFm = textPaint.fontMetrics
-            val cYOff = -(cFm.ascent + cFm.descent) / 2f
-
-            textPaint.color = accentRed
-            canvas.drawText("N", subCx, subCy - cardR + cYOff, textPaint)
-            textPaint.color = compassTextColor
-            canvas.drawText("E", subCx + cardR, subCy + cYOff, textPaint)
-            canvas.drawText("S", subCx, subCy + cardR + cYOff, textPaint)
-            canvas.drawText("W", subCx - cardR, subCy + cYOff, textPaint)
-
-            // Double-ended compass needle
-            canvas.save()
-            canvas.rotate(azimuthDeg, subCx, subCy)
-
-            pathTmp.reset()
-            pathTmp.moveTo(subCx, subCy - subR * 0.74f)
-            pathTmp.lineTo(subCx - subR * 0.095f, subCy)
-            pathTmp.lineTo(subCx + subR * 0.095f, subCy)
-            pathTmp.close()
-            capPaint.color = accentRed
-            canvas.drawPath(pathTmp, capPaint)
-
-            pathTmp.reset()
-            pathTmp.moveTo(subCx, subCy + subR * 0.46f)
-            pathTmp.lineTo(subCx - subR * 0.08f, subCy)
-            pathTmp.lineTo(subCx + subR * 0.08f, subCy)
-            pathTmp.close()
-            capPaint.color = if (dark) Color.parseColor("#CBD5E1") else Color.parseColor("#475569")
-            canvas.drawPath(pathTmp, capPaint)
-
-            capPaint.color = if (dark) Color.parseColor("#F8FAFC") else Color.parseColor("#1E293B")
-            canvas.drawCircle(subCx, subCy, subR * 0.085f, capPaint)
-            canvas.restore()
-        }
-
-        // 6. Center-Down G-Shock Beveled Digital LCD Column
-        // Format:
-        //   24H 23.49 20
-        //   flotime | Sat 21
-        val lcdTop = cy + dialR * 0.205f
-        val lcdMidY = cy + dialR * 0.415f
+        // 5. Center-Down G-Shock Beveled Digital LCD Column with Luxury Gold Border List
+        // Format Row 1: [24H/12H] 23.49 20.752 (millis in red, 1..3 digits)
+        // Format Row 2: flotime | Sun 22 (or flotime | Sun 22 AM in 12H mode)
+        val lcdTop = cy + dialR * 0.185f
+        val lcdMidY = cy + dialR * 0.405f
         val lcdBottom = cy + dialR * 0.575f
-        val lcdHalfWTop = dialR * 0.490f
-        val lcdHalfWBot = dialR * 0.355f
+        val lcdHalfWTop = dialR * 0.555f
+        val lcdHalfWBot = dialR * 0.395f
 
         lcdPath.reset()
         lcdPath.moveTo(cx - lcdHalfWTop, lcdTop)
@@ -505,7 +366,7 @@ internal class GShockClockRenderer(private val density: Float) {
         lcdPath.lineTo(cx - lcdHalfWTop, lcdMidY)
         lcdPath.close()
 
-        val cornerPx = dialR * 0.036f
+        val cornerPx = dialR * 0.038f
         if (abs(cornerPx - lastLcdCornerPx) > 0.5f) {
             lastLcdCornerPx = cornerPx
             val effect = CornerPathEffect(cornerPx)
@@ -514,33 +375,43 @@ internal class GShockClockRenderer(private val density: Float) {
         }
 
         lcdBgPaint.color = digitalBtnBg
-        lcdBorderPaint.color = digitalBtnStroke
-        lcdBorderPaint.strokeWidth = max(1.05f * density, dialR * 0.011f)
+        lcdBorderPaint.strokeWidth = max(1.35f * density, dialR * 0.014f)
         canvas.drawPath(lcdPath, lcdBgPaint)
         canvas.drawPath(lcdPath, lcdBorderPaint)
 
         // Subtle horizontal divider inside LCD
         innerRingPaint.color = digitalBtnStroke
-        innerRingPaint.strokeWidth = max(0.7f * density, dialR * 0.006f)
+        innerRingPaint.strokeWidth = max(0.75f * density, dialR * 0.0065f)
         canvas.drawLine(
-            cx - dialR * 0.42f,
+            cx - dialR * 0.47f,
             lcdMidY,
-            cx + dialR * 0.42f,
+            cx + dialR * 0.47f,
             lcdMidY,
             innerRingPaint
         )
 
-        // Row 1: "24H 23.49 20" (centered horizontally; 24H uppercase slim, academic serif blue)
-        val badgeText = "24H"
-        val badgeSize = dialR * 0.068f
-        val hmSize = dialR * 0.118f
-        val secSize = dialR * 0.082f
-        val gapAfterBadge = dialR * 0.036f
-        val gapBeforeSec = dialR * 0.024f
+        // Row 1 layout calculations with auto-fit for 1D / 2D / 3D milliseconds
+        val fitScale = when (millisDigits) {
+            3 -> 0.86f
+            2 -> 0.93f
+            else -> 1.0f
+        }
+        val badgeText = if (use24Hour) "24H" else "12H"
+        val badgeTextSize = dialR * 0.060f * fitScale
+        val badgePadH = dialR * 0.024f
+        val badgePadV = dialR * 0.016f
+        val hmSize = dialR * 0.114f * fitScale
+        val secSize = dialR * 0.080f * fitScale
+        val millisSize = dialR * 0.076f * fitScale
+        val gapAfterBadge = dialR * 0.032f
+        val gapBeforeSec = dialR * 0.020f
 
         textPaint.typeface = sansSlim
-        textPaint.textSize = badgeSize
-        val badgeW = textPaint.measureText(badgeText)
+        textPaint.textSize = badgeTextSize
+        val badgeTextW = textPaint.measureText(badgeText)
+        val badgeFm = textPaint.fontMetrics
+        val badgeBoxW = badgeTextW + badgePadH * 2f
+        val badgeBoxH = (badgeFm.descent - badgeFm.ascent) + badgePadV * 2f
 
         textPaint.typeface = serifAcademicBold
         textPaint.textSize = hmSize
@@ -551,39 +422,78 @@ internal class GShockClockRenderer(private val density: Float) {
         textPaint.textSize = secSize
         val secW = textPaint.measureText(lcdSecStr)
 
-        val row1TotalW = badgeW + gapAfterBadge + hmW + gapBeforeSec + secW
+        val millisText = ".$lcdMillisStr"
+        textPaint.typeface = serifAcademicBold
+        textPaint.textSize = millisSize
+        val millisW = textPaint.measureText(millisText)
+
+        val row1TotalW = badgeBoxW + gapAfterBadge + hmW + gapBeforeSec + secW + millisW
         var cursorX = cx - (row1TotalW / 2f)
-        val row1BaseY = (lcdTop + lcdMidY) / 2f - (hmFm.ascent + hmFm.descent) / 2f
+        val row1CenterY = (lcdTop + lcdMidY) / 2f
+        val row1BaseY = row1CenterY - (hmFm.ascent + hmFm.descent) / 2f
 
-        textPaint.textAlign = Paint.Align.LEFT
+        // Draw tappable 24H / 12H pill badge with subtle gold rim
+        badgeDrawRect.set(
+            cursorX,
+            row1CenterY - badgeBoxH / 2f,
+            cursorX + badgeBoxW,
+            row1CenterY + badgeBoxH / 2f
+        )
+        // Expanded hit area for effortless single tap
+        val hitPad = max(10f * density, dialR * 0.09f)
+        badgeHitRect.set(
+            badgeDrawRect.left - hitPad,
+            badgeDrawRect.top - hitPad,
+            badgeDrawRect.right + hitPad,
+            badgeDrawRect.bottom + hitPad
+        )
 
+        badgeFillPaint.color = if (dark) Color.argb(70, 212, 175, 55) else Color.argb(38, 185, 142, 46)
+        badgeStrokePaint.strokeWidth = max(0.85f * density, dialR * 0.008f)
+        val badgeCorner = badgeBoxH * 0.28f
+        canvas.drawRoundRect(badgeDrawRect, badgeCorner, badgeCorner, badgeFillPaint)
+        canvas.drawRoundRect(badgeDrawRect, badgeCorner, badgeCorner, badgeStrokePaint)
+
+        textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = sansSlim
-        textPaint.textSize = badgeSize
-        textPaint.color = digitalBtnBlueSoft
-        canvas.drawText(badgeText, cursorX, row1BaseY, textPaint)
-        cursorX += badgeW + gapAfterBadge
+        textPaint.textSize = badgeTextSize
+        textPaint.color = digitalBtnBlue
+        val badgeTextY = badgeDrawRect.centerY() - (badgeFm.ascent + badgeFm.descent) / 2f
+        canvas.drawText(badgeText, badgeDrawRect.centerX(), badgeTextY, textPaint)
+        cursorX += badgeBoxW + gapAfterBadge
 
+        // Draw HH.mm (or hh.mm in 12H)
+        textPaint.textAlign = Paint.Align.LEFT
         textPaint.typeface = serifAcademicBold
         textPaint.textSize = hmSize
         textPaint.color = digitalBtnBlue
         canvas.drawText(lcdHmStr, cursorX, row1BaseY, textPaint)
         cursorX += hmW + gapBeforeSec
 
+        // Draw seconds
         textPaint.typeface = serifAcademic
         textPaint.textSize = secSize
         textPaint.color = digitalBtnBlueSoft
         canvas.drawText(lcdSecStr, cursorX, row1BaseY, textPaint)
+        cursorX += secW
 
-        // Row 2: "flotime | Sat 21" (centered in lower beveled half, academic serif blue)
+        // Draw red milliseconds (.X / .XX / .XXX)
+        textPaint.typeface = serifAcademicBold
+        textPaint.textSize = millisSize
+        textPaint.color = accentRed
+        canvas.drawText(millisText, cursorX, row1BaseY, textPaint)
+
+        // Row 2: "flotime | Sun 22" (with AM/PM in 12H mode)
         val row2Brand = "flotime"
         val row2Sep = " | "
-        val row2Size = dialR * 0.070f
+        val dateDisplay = if (use24Hour) dayDateStr else "$dayDateStr $amPmStr"
+        val row2Size = dialR * (if (use24Hour) 0.068f else 0.062f)
 
         textPaint.typeface = serifAcademic
         textPaint.textSize = row2Size
         val bW = textPaint.measureText(row2Brand)
         val sepW = textPaint.measureText(row2Sep)
-        val dateW = textPaint.measureText(dayDateStr)
+        val dateW = textPaint.measureText(dateDisplay)
         val row2TotalW = bW + sepW + dateW
 
         val row2Fm = textPaint.fontMetrics
@@ -600,9 +510,9 @@ internal class GShockClockRenderer(private val density: Float) {
         r2X += sepW
 
         textPaint.color = digitalBtnBlue
-        canvas.drawText(dayDateStr, r2X, row2BaseY, textPaint)
+        canvas.drawText(dateDisplay, r2X, row2BaseY, textPaint)
 
-        // 7. Classic Sculpted G-Shock Analog Hands (Discrete Quartz Ticking)
+        // 6. Classic Sculpted Analog Hands (Discrete Quartz Ticking)
         cal.timeInMillis = nowMillis
         val hour = cal.get(Calendar.HOUR)
         val minute = cal.get(Calendar.MINUTE)
@@ -668,10 +578,10 @@ internal class GShockClockRenderer(private val density: Float) {
             secHandPaint
         )
 
-        capPaint.color = if (dark) Color.parseColor("#1E293B") else Color.parseColor("#334155")
-        canvas.drawCircle(cx, cy, dialR * 0.056f, capPaint)
+        // Luxury gold-rimmed center pin cap
+        canvas.drawCircle(cx, cy, dialR * 0.060f, luxuryGoldFillPaint)
         capPaint.color = accentRed
-        canvas.drawCircle(cx, cy, dialR * 0.035f, capPaint)
+        canvas.drawCircle(cx, cy, dialR * 0.036f, capPaint)
         capPaint.color = if (dark) Color.parseColor("#0F172A") else Color.WHITE
         canvas.drawCircle(cx, cy, dialR * 0.014f, capPaint)
     }
@@ -730,6 +640,7 @@ class FloatingClockService : Service() {
         const val ACTION_UPDATE_PRECISION = "com.flotime.ACTION_UPDATE_PRECISION"
         const val ACTION_UPDATE_TICK_SOUND = "com.flotime.ACTION_UPDATE_TICK_SOUND"
         const val ACTION_TOGGLE_FLOAT_STYLE = "com.flotime.ACTION_TOGGLE_FLOAT_STYLE"
+        const val ACTION_TOGGLE_TIME_FORMAT = "com.flotime.ACTION_TOGGLE_TIME_FORMAT"
 
         private const val CHANNEL_ID = "floating_clock_channel"
         private const val NOTIFICATION_ID = 1001
@@ -739,6 +650,7 @@ class FloatingClockService : Service() {
         private const val KEY_MILLIS_DIGITS = "millis_digits"
         private const val KEY_TICK_SOUND = "tick_sound_enabled"
         private const val KEY_ANALOG_FLOATING = "analog_floating"
+        private const val KEY_USE_24H_FORMAT = "use_24h_format"
         private const val MIN_SCALE = 0.6f
         private const val MAX_SCALE = 2.2f
 
@@ -760,6 +672,9 @@ class FloatingClockService : Service() {
 
         @Volatile
         var useAnalogFloating = false
+
+        @Volatile
+        var use24HourFormat = true
 
         @Volatile
         var latestUpSpeedText = "0.00 KB/s"
@@ -993,6 +908,7 @@ class FloatingClockService : Service() {
             millisDigits = prefs.getInt(KEY_MILLIS_DIGITS, 1).coerceIn(1, 3)
             tickSoundEnabled = prefs.getBoolean(KEY_TICK_SOUND, false)
             useAnalogFloating = prefs.getBoolean(KEY_ANALOG_FLOATING, false)
+            use24HourFormat = prefs.getBoolean(KEY_USE_24H_FORMAT, true)
             if (tickSoundEnabled) {
                 preloadTickSound()
             }
@@ -1003,6 +919,14 @@ class FloatingClockService : Service() {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_ANALOG_FLOATING, enabled)
+                .apply()
+        }
+
+        fun setUse24HourFormat(context: Context, use24h: Boolean) {
+            use24HourFormat = use24h
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_USE_24H_FORMAT, use24h)
                 .apply()
         }
 
@@ -1110,9 +1034,12 @@ class FloatingClockService : Service() {
     private var isDockVisible = false
     private var hoveredAction = HOVER_NONE
 
-    private val timeFormat = SimpleDateFormat("HH:mm:ss.", Locale.US)
-    private val lcdHmFormat = SimpleDateFormat("HH.mm", Locale.US)
+    private val timeFormat24 = SimpleDateFormat("HH:mm:ss.", Locale.US)
+    private val timeFormat12 = SimpleDateFormat("hh:mm:ss.", Locale.US)
+    private val lcdHmFormat24 = SimpleDateFormat("HH.mm", Locale.US)
+    private val lcdHmFormat12 = SimpleDateFormat("hh.mm", Locale.US)
     private val lcdSecFormat = SimpleDateFormat("ss", Locale.US)
+    private val amPmFormat = SimpleDateFormat("a", Locale.US)
     private val floatingDateFormat = SimpleDateFormat("EEE, MMM d", Locale.ENGLISH)
     private val gshockLcdDayDateFormat = SimpleDateFormat("EEE d", Locale.ENGLISH)
     private var lastDateUpdateSec = -1L
@@ -1123,136 +1050,19 @@ class FloatingClockService : Service() {
     private var prevTxBytes = 0L
     private var prevMetricsTimeMs = 0L
 
-    // Real-time dynamic FPS/Hz monitor (Choreographer sliding-window, Scene-style)
-    private var currentHz = 60
-    private val dynamicHzMonitor = DynamicRefreshRateMonitor(
-        maxHzProvider = { readMaxDisplayRefreshRate() },
-        onRateChanged = { measuredHz ->
-            if (!isServiceActive) return@DynamicRefreshRateMonitor
-            currentHz = measuredHz
-            latestRefreshRateHz = measuredHz
-            tvRefreshRate?.text = "${measuredHz}Hz"
-            if (useAnalogFloating) {
-                refreshGShockClock(force = false)
-            }
-        }
-    )
-
-    private fun syncDynamicHzMonitor() {
-        if (isServiceActive && showMetrics) {
-            dynamicHzMonitor.start()
-        } else {
-            dynamicHzMonitor.stop()
-        }
-    }
-
-    private fun readMaxDisplayRefreshRate(): Int {
-        return try {
-            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
-            val maxModeRate = display?.supportedModes?.maxOfOrNull { it.refreshRate }
-            val currentRate = display?.refreshRate ?: run {
-                @Suppress("DEPRECATION")
-                windowManager.defaultDisplay.refreshRate
-            }
-            max(maxModeRate ?: currentRate, currentRate).roundToInt().coerceIn(60, 240)
-        } catch (_: Exception) {
-            120
-        }
-    }
-
-    // Compass sensor state
-    private var sensorManager: SensorManager? = null
-    private var compassAzimuthDeg = 0f
-    private var compassCardinal = "N"
-    private val rotationMatrix = FloatArray(9)
-    private val orientationAngles = FloatArray(3)
-    private val accelValues = FloatArray(3)
-    private val magValues = FloatArray(3)
-    private var hasAccel = false
-    private var hasMag = false
-
-    private val sensorListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent?) {
-            event ?: return
-            when (event.sensor.type) {
-                Sensor.TYPE_ROTATION_VECTOR -> {
-                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
-                    val deg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
-                    updateAzimuth(deg)
-                }
-                Sensor.TYPE_ACCELEROMETER -> {
-                    System.arraycopy(event.values, 0, accelValues, 0, 3)
-                    hasAccel = true
-                    computeFallbackOrientation()
-                }
-                Sensor.TYPE_MAGNETIC_FIELD -> {
-                    System.arraycopy(event.values, 0, magValues, 0, 3)
-                    hasMag = true
-                    computeFallbackOrientation()
-                }
-            }
-        }
-
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-
-    private fun computeFallbackOrientation() {
-        if (!hasAccel || !hasMag) return
-        if (SensorManager.getRotationMatrix(rotationMatrix, null, accelValues, magValues)) {
-            SensorManager.getOrientation(rotationMatrix, orientationAngles)
-            val deg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
-            updateAzimuth(deg)
-        }
-    }
-
-    private fun updateAzimuth(rawDeg: Float) {
-        val normalized = ((rawDeg % 360f) + 360f) % 360f
-        compassAzimuthDeg = normalized
-        compassCardinal = azimuthToCardinal(normalized)
-    }
-
-    private fun registerCompassSensor() {
-        if (sensorManager != null) return
-        val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager ?: return
-        val rotSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        if (rotSensor != null) {
-            sm.registerListener(sensorListener, rotSensor, SensorManager.SENSOR_DELAY_UI)
-            sensorManager = sm
-        } else {
-            val acc = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-            val mag = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
-            if (acc != null && mag != null) {
-                sm.registerListener(sensorListener, acc, SensorManager.SENSOR_DELAY_UI)
-                sm.registerListener(sensorListener, mag, SensorManager.SENSOR_DELAY_UI)
-                sensorManager = sm
-            }
-        }
-    }
-
-    private fun unregisterCompassSensor() {
-        sensorManager?.unregisterListener(sensorListener)
-        sensorManager = null
-        hasAccel = false
-        hasMag = false
-    }
-
-    private fun refreshGShockClock(force: Boolean) {
+    private fun refreshGShockClock() {
         val now = getCurrentTimestamp()
         val nowDate = Date(now)
+        val hmText = if (use24HourFormat) lcdHmFormat24.format(nowDate) else lcdHmFormat12.format(nowDate)
         gshockClockView?.updateState(
             nowMillis = now,
-            lcdHmStr = lcdHmFormat.format(nowDate),
+            lcdHmStr = hmText,
             lcdSecStr = lcdSecFormat.format(nowDate),
+            lcdMillisStr = formatMillisFraction(now, millisDigits),
+            millisDigits = millisDigits,
             dayDateStr = gshockLcdDayDateFormat.format(nowDate),
-            hzValue = currentHz,
-            upText = latestUpSpeedText,
-            downText = latestDownSpeedText,
-            azimuthDeg = compassAzimuthDeg,
-            cardinal = compassCardinal,
-            showStats = showMetrics,
-            force = force
+            use24Hour = use24HourFormat,
+            amPmStr = amPmFormat.format(nowDate)
         )
     }
 
@@ -1262,10 +1072,10 @@ class FloatingClockService : Service() {
             val now = getCurrentTimestamp()
 
             if (useAnalogFloating) {
-                refreshGShockClock(force = false)
-                mainHandler.postDelayed(this, 100L)
+                refreshGShockClock()
             } else {
-                val hms = timeFormat.format(Date(now))
+                val nowDate = Date(now)
+                val hms = if (use24HourFormat) timeFormat24.format(nowDate) else timeFormat12.format(nowDate)
                 val frac = formatMillisFraction(now, millisDigits)
 
                 tvTimeHms?.text = hms
@@ -1274,44 +1084,47 @@ class FloatingClockService : Service() {
                 val currentSec = now / 1000L
                 if (currentSec != lastDateUpdateSec) {
                     lastDateUpdateSec = currentSec
-                    tvDateBadge?.text = floatingDateFormat.format(Date(now))
+                    tvDateBadge?.text = floatingDateFormat.format(nowDate)
+                    tvTimeSource?.text = if (use24HourFormat) {
+                        getString(R.string.device_time)
+                    } else {
+                        "${getString(R.string.device_time)} • ${amPmFormat.format(nowDate)}"
+                    }
                 }
-                mainHandler.postDelayed(this, if (millisDigits >= 2) 16L else 33L)
             }
+            mainHandler.postDelayed(this, if (millisDigits >= 2) 16L else 33L)
         }
     }
 
     private val metricsRunnable = object : Runnable {
         override fun run() {
             if (!isServiceActive) return
-            val nowMs = System.currentTimeMillis()
-            val elapsedSec = ((nowMs - prevMetricsTimeMs) / 1000.0).coerceAtLeast(0.5)
-            prevMetricsTimeMs = nowMs
+            if (!useAnalogFloating && showMetrics) {
+                val nowMs = System.currentTimeMillis()
+                val elapsedSec = ((nowMs - prevMetricsTimeMs) / 1000.0).coerceAtLeast(0.5)
+                prevMetricsTimeMs = nowMs
 
-            val currentRx = TrafficStats.getTotalRxBytes()
-            val currentTx = TrafficStats.getTotalTxBytes()
+                val currentRx = TrafficStats.getTotalRxBytes()
+                val currentTx = TrafficStats.getTotalTxBytes()
 
-            val rxDelta = if (currentRx != TrafficStats.UNSUPPORTED.toLong() && prevRxBytes != TrafficStats.UNSUPPORTED.toLong()) {
-                (currentRx - prevRxBytes).coerceAtLeast(0L)
-            } else 0L
+                val rxDelta = if (currentRx != TrafficStats.UNSUPPORTED.toLong() && prevRxBytes != TrafficStats.UNSUPPORTED.toLong()) {
+                    (currentRx - prevRxBytes).coerceAtLeast(0L)
+                } else 0L
 
-            val txDelta = if (currentTx != TrafficStats.UNSUPPORTED.toLong() && prevTxBytes != TrafficStats.UNSUPPORTED.toLong()) {
-                (currentTx - prevTxBytes).coerceAtLeast(0L)
-            } else 0L
+                val txDelta = if (currentTx != TrafficStats.UNSUPPORTED.toLong() && prevTxBytes != TrafficStats.UNSUPPORTED.toLong()) {
+                    (currentTx - prevTxBytes).coerceAtLeast(0L)
+                } else 0L
 
-            prevRxBytes = currentRx
-            prevTxBytes = currentTx
+                prevRxBytes = currentRx
+                prevTxBytes = currentTx
 
-            latestUpSpeedText = formatRate(txDelta / elapsedSec)
-            latestDownSpeedText = formatRate(rxDelta / elapsedSec)
+                latestUpSpeedText = formatRate(txDelta / elapsedSec)
+                latestDownSpeedText = formatRate(rxDelta / elapsedSec)
+                latestRefreshRateHz = getScreenRefreshRate()
 
-            tvNetSpeed?.text = "↑ $latestUpSpeedText\n↓ $latestDownSpeedText"
-            tvRefreshRate?.text = "${currentHz}Hz"
-
-            if (useAnalogFloating) {
-                refreshGShockClock(force = false)
+                tvNetSpeed?.text = "↑ $latestUpSpeedText\n↓ $latestDownSpeedText"
+                tvRefreshRate?.text = "${latestRefreshRateHz}Hz"
             }
-
             mainHandler.postDelayed(this, 1000L)
         }
     }
@@ -1324,17 +1137,9 @@ class FloatingClockService : Service() {
         isRunning = true
         loadPreferences(this)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        @Suppress("DEPRECATION")
-        currentHz = try {
-            windowManager.defaultDisplay.refreshRate.roundToInt().coerceIn(1, 240)
-        } catch (_: Exception) {
-            60
-        }
-        latestRefreshRateHz = currentHz
+        latestRefreshRateHz = getScreenRefreshRate()
         startForegroundNotification()
         initFloatingView()
-        registerCompassSensor()
-        syncDynamicHzMonitor()
         startClockLoop()
         syncTickAudioState()
         startMetricsLoop()
@@ -1348,12 +1153,12 @@ class FloatingClockService : Service() {
             }
             ACTION_TOGGLE_METRICS -> {
                 showMetrics = !showMetrics
-                syncDynamicHzMonitor()
                 updateMetricsVisibility()
             }
             ACTION_UPDATE_PRECISION -> {
                 loadPreferences(this)
                 applyFloatingPrecisionSizing()
+                if (useAnalogFloating) refreshGShockClock()
             }
             ACTION_UPDATE_TICK_SOUND -> {
                 loadPreferences(this)
@@ -1362,8 +1167,12 @@ class FloatingClockService : Service() {
             ACTION_TOGGLE_FLOAT_STYLE -> {
                 loadPreferences(this)
                 recreateFloatingViewPreservingPosition()
-                syncDynamicHzMonitor()
                 startClockLoop()
+            }
+            ACTION_TOGGLE_TIME_FORMAT -> {
+                loadPreferences(this)
+                lastDateUpdateSec = -1L
+                if (useAnalogFloating) refreshGShockClock()
             }
         }
         return START_STICKY
@@ -1526,8 +1335,6 @@ class FloatingClockService : Service() {
     private fun closeFloatingAndStop() {
         isServiceActive = false
         isRunning = false
-        dynamicHzMonitor.stop()
-        unregisterCompassSensor()
         if (System.currentTimeMillis() - TickAudioEngine.lastHeartbeatMs > 1200L) {
             TickAudioEngine.stop()
         }
@@ -1877,7 +1684,7 @@ class FloatingClockService : Service() {
         floatingView = wrapperView
 
         if (renderedAnalogMode) {
-            refreshGShockClock(force = true)
+            refreshGShockClock()
         } else {
             tvDateBadge = contentView.findViewById(R.id.tvPing)
             tvTimeSource = contentView.findViewById(R.id.tvTimeSource)
@@ -1887,12 +1694,17 @@ class FloatingClockService : Service() {
             tvNetSpeed = contentView.findViewById(R.id.tvNetSpeed)
 
             val now = getCurrentTimestamp()
+            val nowDate = Date(now)
             lastDateUpdateSec = now / 1000L
             tvDateBadge?.visibility = View.VISIBLE
-            tvDateBadge?.text = floatingDateFormat.format(Date(now))
-            tvTimeSource?.text = getString(R.string.device_time)
+            tvDateBadge?.text = floatingDateFormat.format(nowDate)
+            tvTimeSource?.text = if (use24HourFormat) {
+                getString(R.string.device_time)
+            } else {
+                "${getString(R.string.device_time)} • ${amPmFormat.format(nowDate)}"
+            }
             tvNetSpeed?.text = "↑ $latestUpSpeedText\n↓ $latestDownSpeedText"
-            tvRefreshRate?.text = "${currentHz}Hz"
+            tvRefreshRate?.text = "${latestRefreshRateHz}Hz"
 
             tvTimeHms?.let {
                 baseFloatHmsSizePx = it.textSize
@@ -1927,6 +1739,7 @@ class FloatingClockService : Service() {
 
         updateMetricsVisibility()
 
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop.toFloat()
         var initialWinX = 0
         var initialWinY = 0
         var initialWinW = 0
@@ -1937,6 +1750,7 @@ class FloatingClockService : Service() {
         var initialScale = currentScale
         var isPinching = false
         var blockDragUntilUp = false
+        var hasMovedPastSlop = false
 
         wrapperView.setOnTouchListener { v: View, event: MotionEvent ->
             val (screenWidth, screenHeight) = getRealScreenSize()
@@ -1945,6 +1759,7 @@ class FloatingClockService : Service() {
                 MotionEvent.ACTION_DOWN -> {
                     isPinching = false
                     blockDragUntilUp = false
+                    hasMovedPastSlop = false
                     hoveredAction = HOVER_NONE
                     initialWinX = layoutParams.x
                     initialWinY = layoutParams.y
@@ -1956,6 +1771,7 @@ class FloatingClockService : Service() {
                 MotionEvent.ACTION_POINTER_DOWN -> {
                     if (event.pointerCount >= 2) {
                         hideBottomActionDock()
+                        hasMovedPastSlop = true
                         val span = getFingerSpan(event)
                         if (span > 10f) {
                             isPinching = true
@@ -1974,6 +1790,7 @@ class FloatingClockService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     if (event.pointerCount >= 2) {
                         hideBottomActionDock()
+                        hasMovedPastSlop = true
                         val span = getFingerSpan(event)
                         if (!isPinching) {
                             if (span > 10f) {
@@ -2009,35 +1826,42 @@ class FloatingClockService : Service() {
                         }
                         true
                     } else if (!blockDragUntilUp) {
+                        val deltaX = event.rawX - initialTouchX
                         val deltaY = event.rawY - initialTouchY
-                        layoutParams.x = initialWinX + (event.rawX - initialTouchX).roundToInt()
-                        layoutParams.y = initialWinY + deltaY.roundToInt()
-                        if (v.isAttachedToWindow) {
-                            windowManager.updateViewLayout(v, layoutParams)
+                        if (!hasMovedPastSlop && hypot(deltaX, deltaY) > touchSlop) {
+                            hasMovedPastSlop = true
                         }
 
-                        val clockCenterX = layoutParams.x + (layoutParams.width / 2f)
-                        val clockCenterY = layoutParams.y + (layoutParams.height / 2f)
+                        if (hasMovedPastSlop) {
+                            layoutParams.x = initialWinX + deltaX.roundToInt()
+                            layoutParams.y = initialWinY + deltaY.roundToInt()
+                            if (v.isAttachedToWindow) {
+                                windowManager.updateViewLayout(v, layoutParams)
+                            }
 
-                        if (!isDockVisible && (deltaY > dp(24) || clockCenterY > screenHeight * 0.56f)) {
-                            showBottomActionDock()
-                        }
+                            val clockCenterX = layoutParams.x + (layoutParams.width / 2f)
+                            val clockCenterY = layoutParams.y + (layoutParams.height / 2f)
 
-                        if (isDockVisible) {
-                            val newHover = detectHoveredDockAction(
-                                fingerX = event.rawX,
-                                fingerY = event.rawY,
-                                clockCenterX = clockCenterX,
-                                clockCenterY = clockCenterY,
-                                screenWidth = screenWidth,
-                                screenHeight = screenHeight
-                            )
+                            if (!isDockVisible && (deltaY > dp(24) || clockCenterY > screenHeight * 0.56f)) {
+                                showBottomActionDock()
+                            }
 
-                            if (newHover != hoveredAction) {
-                                hoveredAction = newHover
-                                updateDockHighlight(hoveredAction)
-                                if (hoveredAction != HOVER_NONE) {
-                                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            if (isDockVisible) {
+                                val newHover = detectHoveredDockAction(
+                                    fingerX = event.rawX,
+                                    fingerY = event.rawY,
+                                    clockCenterX = clockCenterX,
+                                    clockCenterY = clockCenterY,
+                                    screenWidth = screenWidth,
+                                    screenHeight = screenHeight
+                                )
+
+                                if (newHover != hoveredAction) {
+                                    hoveredAction = newHover
+                                    updateDockHighlight(hoveredAction)
+                                    if (hoveredAction != HOVER_NONE) {
+                                        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                                    }
                                 }
                             }
                         }
@@ -2056,6 +1880,9 @@ class FloatingClockService : Service() {
                 }
 
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val isSingleTap = event.actionMasked == MotionEvent.ACTION_UP &&
+                        !hasMovedPastSlop && !isPinching && !blockDragUntilUp
+
                     val selectedAction = if (event.actionMasked == MotionEvent.ACTION_UP) {
                         hoveredAction
                     } else {
@@ -2070,24 +1897,34 @@ class FloatingClockService : Service() {
                     isPinching = false
                     blockDragUntilUp = false
 
-                    when (selectedAction) {
-                        HOVER_CLOSE -> {
-                            closeFloatingAndStop()
+                    if (isSingleTap && renderedAnalogMode) {
+                        val unscaledX = event.x / currentScale
+                        val unscaledY = event.y / currentScale
+                        if (gshockClockView?.isTapOnFormatBadge(unscaledX, unscaledY) == true) {
+                            setUse24HourFormat(this, !use24HourFormat)
+                            v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            refreshGShockClock()
                         }
-                        HOVER_HOME -> {
-                            layoutParams.x = initialWinX
-                            layoutParams.y = initialWinY
-                                .coerceAtMost((screenHeight - layoutParams.height - dp(140)).coerceAtLeast(dp(40)))
-                                .coerceAtLeast(dp(40))
-                            if (v.isAttachedToWindow) {
-                                windowManager.updateViewLayout(v, layoutParams)
+                    } else {
+                        when (selectedAction) {
+                            HOVER_CLOSE -> {
+                                closeFloatingAndStop()
                             }
-                            val homeIntent = Intent(this, MainActivity::class.java).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            HOVER_HOME -> {
+                                layoutParams.x = initialWinX
+                                layoutParams.y = initialWinY
+                                    .coerceAtMost((screenHeight - layoutParams.height - dp(140)).coerceAtLeast(dp(40)))
+                                    .coerceAtLeast(dp(40))
+                                if (v.isAttachedToWindow) {
+                                    windowManager.updateViewLayout(v, layoutParams)
+                                }
+                                val homeIntent = Intent(this, MainActivity::class.java).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                }
+                                startActivity(homeIntent)
                             }
-                            startActivity(homeIntent)
                         }
                     }
                     true
@@ -2104,56 +1941,36 @@ class FloatingClockService : Service() {
         private val renderer = GShockClockRenderer(resources.displayMetrics.density)
 
         private var nowMillis = System.currentTimeMillis()
-        private var lastRenderedSec = -1L
         private var lcdHmStr = "00.00"
         private var lcdSecStr = "00"
-        private var dayDateStr = "Sat 21"
-        private var hzValue = 60
-        private var upText = "0.00 KB/s"
-        private var downText = "0.00 KB/s"
-        private var azimuthDeg = 0f
-        private var lastAzimuthInt = -1
-        private var cardinalStr = "N"
-        private var showStats = true
+        private var lcdMillisStr = "0"
+        private var currentMillisDigits = 1
+        private var dayDateStr = "Sun 22"
+        private var use24Hour = true
+        private var amPmStr = "AM"
+
+        fun isTapOnFormatBadge(x: Float, y: Float): Boolean {
+            return renderer.isTouchOnFormatBadge(x, y)
+        }
 
         fun updateState(
             nowMillis: Long,
             lcdHmStr: String,
             lcdSecStr: String,
+            lcdMillisStr: String,
+            millisDigits: Int,
             dayDateStr: String,
-            hzValue: Int,
-            upText: String,
-            downText: String,
-            azimuthDeg: Float,
-            cardinal: String,
-            showStats: Boolean,
-            force: Boolean = false
+            use24Hour: Boolean,
+            amPmStr: String
         ) {
-            val sec = nowMillis / 1000L
-            val azInt = azimuthDeg.roundToInt()
-            val changed = force ||
-                sec != lastRenderedSec ||
-                hzValue != this.hzValue ||
-                upText != this.upText ||
-                downText != this.downText ||
-                azInt != lastAzimuthInt ||
-                cardinal != this.cardinalStr ||
-                showStats != this.showStats
-
-            if (!changed) return
-
             this.nowMillis = nowMillis
-            this.lastRenderedSec = sec
             this.lcdHmStr = lcdHmStr
             this.lcdSecStr = lcdSecStr
+            this.lcdMillisStr = lcdMillisStr
+            this.currentMillisDigits = millisDigits
             this.dayDateStr = dayDateStr
-            this.hzValue = hzValue
-            this.upText = upText
-            this.downText = downText
-            this.azimuthDeg = azimuthDeg
-            this.lastAzimuthInt = azInt
-            this.cardinalStr = cardinal
-            this.showStats = showStats
+            this.use24Hour = use24Hour
+            this.amPmStr = amPmStr
             invalidate()
         }
 
@@ -2170,13 +1987,11 @@ class FloatingClockService : Service() {
                 nowMillis = nowMillis,
                 lcdHmStr = lcdHmStr,
                 lcdSecStr = lcdSecStr,
+                lcdMillisStr = lcdMillisStr,
+                millisDigits = currentMillisDigits,
                 dayDateStr = dayDateStr,
-                hzValue = hzValue,
-                upText = upText,
-                downText = downText,
-                azimuthDeg = azimuthDeg,
-                cardinalStr = cardinalStr,
-                showStats = showStats,
+                use24Hour = use24Hour,
+                amPmStr = amPmStr,
                 dark = true
             )
         }
@@ -2188,9 +2003,6 @@ class FloatingClockService : Service() {
         tvTimeSource?.visibility = visibility
         tvRefreshRate?.visibility = visibility
         tvNetSpeed?.visibility = visibility
-        if (useAnalogFloating) {
-            refreshGShockClock(force = true)
-        }
     }
 
     private fun startClockLoop() {
@@ -2206,13 +2018,18 @@ class FloatingClockService : Service() {
         mainHandler.postDelayed(metricsRunnable, 1000L)
     }
 
-    private fun formatRate(bytesPerSec: Double): String = Companion.formatRate(bytesPerSec)
+    @Suppress("DEPRECATION")
+    private fun getScreenRefreshRate(): Int {
+        return try {
+            windowManager.defaultDisplay.refreshRate.roundToInt().coerceIn(1, 240)
+        } catch (_: Exception) {
+            60
+        }
+    }
 
     override fun onDestroy() {
         isServiceActive = false
         isRunning = false
-        dynamicHzMonitor.stop()
-        unregisterCompassSensor()
         mainHandler.removeCallbacksAndMessages(null)
         if (System.currentTimeMillis() - TickAudioEngine.lastHeartbeatMs > 1200L) {
             TickAudioEngine.stop()
