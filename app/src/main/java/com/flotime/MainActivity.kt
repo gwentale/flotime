@@ -54,6 +54,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -107,46 +108,43 @@ class MainActivity : Activity() {
     private val developerUrl = "https://youtu.be/dQw4w9WgXcQ"
     private val millisRedColor = Color.parseColor("#FF3B1D")
 
-    // Adaptive display refresh rate monitor
-    private var displayManager: DisplayManager? = null
-    private var currentFps = 60
-
-    private val displayListener = object : DisplayManager.DisplayListener {
-        override fun onDisplayAdded(displayId: Int) {}
-        override fun onDisplayRemoved(displayId: Int) {}
-        override fun onDisplayChanged(displayId: Int) {
-            if (displayId == Display.DEFAULT_DISPLAY && isForeground) {
-                currentFps = readAdaptiveRefreshRate()
-                if (isAnalogMode) {
-                    refreshHomeAnalogClock(force = false)
-                }
+    // Real-time dynamic FPS/Hz monitor (local fallback when overlay service isn't running)
+    private var currentHz = 60
+    private val dynamicHzMonitor = DynamicRefreshRateMonitor(
+        maxHzProvider = { readMaxDisplayRefreshRate() },
+        onRateChanged = { measuredHz ->
+            if (!isForeground || isFinishing || isDestroyed) return@DynamicRefreshRateMonitor
+            currentHz = measuredHz
+            if (isAnalogMode) {
+                refreshHomeAnalogClock(force = false)
             }
+        }
+    )
+
+    private fun syncLocalHzMonitor() {
+        val shouldRun = isForeground &&
+            isAnalogMode &&
+            FloatingClockService.showMetrics &&
+            !FloatingClockService.isRunning
+        if (shouldRun) {
+            dynamicHzMonitor.start()
+        } else {
+            dynamicHzMonitor.stop()
         }
     }
 
-    private fun registerDisplayMonitor() {
-        if (displayManager != null) return
-        val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
-        displayManager = dm
-        dm.registerDisplayListener(displayListener, mainHandler)
-    }
-
-    private fun unregisterDisplayMonitor() {
-        displayManager?.unregisterDisplayListener(displayListener)
-        displayManager = null
-    }
-
-    private fun readAdaptiveRefreshRate(): Int {
+    private fun readMaxDisplayRefreshRate(): Int {
         return try {
-            val dm = displayManager ?: (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
             val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
-            val rate = display?.refreshRate ?: run {
+            val maxModeRate = display?.supportedModes?.maxOfOrNull { it.refreshRate }
+            val currentRate = display?.refreshRate ?: run {
                 @Suppress("DEPRECATION")
                 windowManager.defaultDisplay.refreshRate
             }
-            rate.roundToInt().coerceIn(1, 240)
+            max(maxModeRate ?: currentRate, currentRate).roundToInt().coerceIn(60, 240)
         } catch (_: Exception) {
-            60
+            120
         }
     }
 
@@ -236,6 +234,7 @@ class MainActivity : Activity() {
         if (FloatingClockService.isRunning) {
             homeUpSpeed = FloatingClockService.latestUpSpeedText
             homeDownSpeed = FloatingClockService.latestDownSpeedText
+            currentHz = FloatingClockService.latestRefreshRateHz
             return
         }
         val elapsedSec = (nowRealMs - prevStatsSampleMs) / 1000.0
@@ -265,7 +264,7 @@ class MainActivity : Activity() {
             lcdHmStr = lcdHmFormat.format(nowDate),
             lcdSecStr = lcdSecFormat.format(nowDate),
             dayDateStr = lcdDayDateFormat.format(nowDate),
-            fps = currentFps,
+            hzValue = currentHz,
             upText = homeUpSpeed,
             downText = homeDownSpeed,
             azimuthDeg = compassAzimuthDeg,
@@ -283,11 +282,11 @@ class MainActivity : Activity() {
             val nowDate = Date(now)
 
             if (isAnalogMode) {
-                currentFps = readAdaptiveRefreshRate()
+                syncLocalHzMonitor()
                 updateLocalStatsIfNeeded(nowReal)
                 refreshHomeAnalogClock(force = false)
                 updateUiState()
-                mainHandler.postDelayed(this, 200L)
+                mainHandler.postDelayed(this, 100L)
             } else {
                 val hms = timeFormat.format(nowDate)
                 val dateStr = dateFormat.format(nowDate)
@@ -361,7 +360,12 @@ class MainActivity : Activity() {
         prevRxBytes = TrafficStats.getTotalRxBytes()
         prevTxBytes = TrafficStats.getTotalTxBytes()
         prevStatsSampleMs = System.currentTimeMillis()
-        currentFps = readAdaptiveRefreshRate()
+        @Suppress("DEPRECATION")
+        currentHz = try {
+            windowManager.defaultDisplay.refreshRate.roundToInt().coerceIn(1, 240)
+        } catch (_: Exception) {
+            60
+        }
 
         setupThemeToggleButton()
         setupPrecisionButton()
@@ -376,11 +380,10 @@ class MainActivity : Activity() {
         if (!Settings.canDrawOverlays(this) && FloatingClockService.isRunning) {
             stopFloatingClockService()
         }
-        registerDisplayMonitor()
-        currentFps = readAdaptiveRefreshRate()
         if (isAnalogMode) {
             registerCompassSensor()
         }
+        syncLocalHzMonitor()
         updateThemeUI()
         applyMainClockPrecisionSizing()
         updateUiState()
@@ -392,7 +395,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         isForeground = false
-        unregisterDisplayMonitor()
+        dynamicHzMonitor.stop()
         unregisterCompassSensor()
         mainHandler.removeCallbacks(mainClockRunnable)
         mainHandler.removeCallbacks(mainTickRunnable)
@@ -400,7 +403,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         isForeground = false
-        unregisterDisplayMonitor()
+        dynamicHzMonitor.stop()
         unregisterCompassSensor()
         mainHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -697,6 +700,7 @@ class MainActivity : Activity() {
                 FloatingClockService.showMetrics = !FloatingClockService.showMetrics
             }
             btnToggleMetrics.postDelayed({
+                syncLocalHzMonitor()
                 if (isAnalogMode) refreshHomeAnalogClock(force = true)
                 updateUiState()
             }, 100)
@@ -725,12 +729,13 @@ class MainActivity : Activity() {
                 layoutDigitalClock.visibility = View.GONE
                 viewAnalogClock.visibility = View.VISIBLE
                 registerCompassSensor()
-                currentFps = readAdaptiveRefreshRate()
+                syncLocalHzMonitor()
                 prevRxBytes = TrafficStats.getTotalRxBytes()
                 prevTxBytes = TrafficStats.getTotalTxBytes()
                 prevStatsSampleMs = System.currentTimeMillis()
                 refreshHomeAnalogClock(force = true)
             } else {
+                dynamicHzMonitor.stop()
                 unregisterCompassSensor()
                 layoutDigitalClock.visibility = View.VISIBLE
                 viewAnalogClock.visibility = View.GONE
@@ -1855,7 +1860,7 @@ class MainActivity : Activity() {
         private var lcdHmStr: String = "00:00"
         private var lcdSecStr: String = "00"
         private var dayDateStr: String = "Sat 21"
-        private var fpsValue: Int = 60
+        private var hzValue: Int = 60
         private var upText: String = "0.00 KB/s"
         private var downText: String = "0.00 KB/s"
         private var azimuthDeg: Float = 0f
@@ -1876,7 +1881,7 @@ class MainActivity : Activity() {
             lcdHmStr: String,
             lcdSecStr: String,
             dayDateStr: String,
-            fps: Int,
+            hzValue: Int,
             upText: String,
             downText: String,
             azimuthDeg: Float,
@@ -1888,7 +1893,7 @@ class MainActivity : Activity() {
             val azInt = azimuthDeg.roundToInt()
             val changed = force ||
                 sec != lastRenderedSec ||
-                fps != this.fpsValue ||
+                hzValue != this.hzValue ||
                 upText != this.upText ||
                 downText != this.downText ||
                 azInt != lastAzimuthInt ||
@@ -1902,7 +1907,7 @@ class MainActivity : Activity() {
             this.lcdHmStr = lcdHmStr
             this.lcdSecStr = lcdSecStr
             this.dayDateStr = dayDateStr
-            this.fpsValue = fps
+            this.hzValue = hzValue
             this.upText = upText
             this.downText = downText
             this.azimuthDeg = azimuthDeg
@@ -1924,7 +1929,7 @@ class MainActivity : Activity() {
                 lcdHmStr = lcdHmStr,
                 lcdSecStr = lcdSecStr,
                 dayDateStr = dayDateStr,
-                fpsValue = fpsValue,
+                hzValue = hzValue,
                 upText = upText,
                 downText = downText,
                 azimuthDeg = azimuthDeg,
@@ -1956,13 +1961,19 @@ class MainActivity : Activity() {
         } else {
             startService(intent)
         }
-        btnToggleFloating.postDelayed({ updateUiState() }, 150)
+        btnToggleFloating.postDelayed({
+            syncLocalHzMonitor()
+            updateUiState()
+        }, 150)
     }
 
     private fun stopFloatingClockService() {
         val intent = Intent(this, FloatingClockService::class.java)
         stopService(intent)
-        btnToggleFloating.postDelayed({ updateUiState() }, 150)
+        btnToggleFloating.postDelayed({
+            syncLocalHzMonitor()
+            updateUiState()
+        }, 150)
     }
 
     private fun updateUiState() {
