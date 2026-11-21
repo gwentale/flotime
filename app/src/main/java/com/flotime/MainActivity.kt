@@ -93,7 +93,7 @@ class MainActivity : Activity() {
     private var hidePopupRunnable: Runnable? = null
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss.", Locale.US)
-    private val lcdHmFormat = SimpleDateFormat("HH:mm", Locale.US)
+    private val lcdHmFormat = SimpleDateFormat("HH.mm", Locale.US)
     private val lcdSecFormat = SimpleDateFormat("ss", Locale.US)
     private val lcdDayDateFormat = SimpleDateFormat("EEE d", Locale.ENGLISH)
     private val dateFormat = SimpleDateFormat("EEEE, dd/MM/yyyy", Locale.ENGLISH)
@@ -1857,7 +1857,7 @@ class MainActivity : Activity() {
 
         private var timeMillis: Long = System.currentTimeMillis()
         private var lastRenderedSec: Long = -1L
-        private var lcdHmStr: String = "00:00"
+        private var lcdHmStr: String = "00.00"
         private var lcdSecStr: String = "00"
         private var dayDateStr: String = "Sat 21"
         private var hzValue: Int = 60
