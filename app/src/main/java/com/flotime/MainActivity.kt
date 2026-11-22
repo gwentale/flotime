@@ -1102,9 +1102,9 @@ class MainActivity : Activity() {
             val dayOfYear = selCal.get(Calendar.DAY_OF_YEAR)
             val isToday = selectedYear == todayYear && selectedMonth == todayMonth && selectedDay == todayDay
             tvSelectedMeta.text = if (isToday) {
-                "Hari ini • Minggu ke-$weekNum • Hari ke-$dayOfYear"
+                "Hari ini | Minggu ke-$weekNum | Hari ke-$dayOfYear"
             } else {
-                "Minggu ke-$weekNum • Hari ke-$dayOfYear"
+                "Minggu ke-$weekNum | Hari ke-$dayOfYear"
             }
         }
 
