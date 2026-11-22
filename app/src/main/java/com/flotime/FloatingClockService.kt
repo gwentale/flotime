@@ -475,13 +475,13 @@ internal class GShockClockRenderer(private val density: Float) {
         val hourNumRadius = dialR * 0.592f
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = sansMedium
-        textPaint.textSize = dialR * (if (use24Hour) 0.094f else 0.104f)
+        textPaint.textSize = dialR * 0.104f
         textPaint.color = hourNumberColor
         val hourFm = textPaint.fontMetrics
         val hourYOffset = -(hourFm.ascent + hourFm.descent) / 2f
         for (h in 1..12) {
             val angleRad = Math.toRadians((h * 30).toDouble())
-            val label = if (use24Hour) (h + 12).toString() else h.toString()
+            val label = h.toString()
             val tx = cx + hourNumRadius * sin(angleRad).toFloat()
             val ty = cy - hourNumRadius * cos(angleRad).toFloat() + hourYOffset
             canvas.drawText(label, tx, ty, textPaint)
