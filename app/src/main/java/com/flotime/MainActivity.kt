@@ -177,7 +177,7 @@ class MainActivity : Activity() {
 
     private val prefsName = "flotime_prefs"
     private val keyThemeMode = "theme_mode"
-    private val developerUrl = "https://youtu.be/dQw4w9WgXcQ"
+    private val developerUrl = "https://github.com/gwentale/flotime"
     private val millisRedColor = Color.parseColor("#FF3B1D")
 
     // Advanced Compass Sensor Engine
